@@ -1,4 +1,3 @@
-# .github/workflows/process-audio.yml
 name: Process Audio (YouTube/SoundCloud/MP3)
 
 on:
@@ -56,12 +55,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
       
-      - name: Install FFmpeg
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg bc
+      # ===== SETUP FFMPEG (CACHED OTOMATIS) =====
+      - name: Setup FFmpeg
+        uses: FedericoCarboni/setup-ffmpeg@v3
+        id: setup-ffmpeg
+        with:
+          ffmpeg-version: release
       
-      - name: Install yt-dlp (for YouTube/SoundCloud)
+      # ===== INSTALL yt-dlp (sekali aja, gak perlu caching) =====
+      - name: Install yt-dlp
         if: inputs.source_type != 'mp3'
         run: |
           sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
@@ -110,7 +112,6 @@ jobs:
         run: |
           cd temp
           
-          # SoundCloud biasanya tidak perlu cookies
           yt-dlp \
             --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
             -x --audio-format mp3 --audio-quality 0 \
@@ -142,7 +143,7 @@ jobs:
           FILENAME="input.mp3"
           TITLE=$(basename "${{ inputs.mp3_file_url }}" | sed 's/\.[^.]*$//')
           
-          # Get duration with ffprobe
+          # Get duration with ffprobe (dari FFmpeg yang sudah di-cache)
           DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 input.mp3)
           
           echo "filename=$FILENAME" >> $GITHUB_OUTPUT
@@ -151,7 +152,7 @@ jobs:
           echo "input_file=temp/$FILENAME" >> $GITHUB_OUTPUT
           cd ..
       
-      # ===== PROCESS AUDIO (SAMA UNTUK SEMUA) =====
+      # ===== PROCESS AUDIO (PAKAI FFMPEG YANG SUDAH DI-CACHE) =====
       - name: Process Audio with FFmpeg
         id: process
         run: |
@@ -186,7 +187,7 @@ jobs:
           # Amplify in dB
           VOLUME=$(echo "e(l(10)*${{ inputs.amplify }}/20)" | bc -l)
           
-          # Process with FFmpeg
+          # Process with FFmpeg (sudah di PATH dari setup-ffmpeg)
           ffmpeg -i "$INPUT_FILE" \
             -filter:a "$SPEED_FILTER,volume=$VOLUME" \
             -t ${{ inputs.max_duration }} \
