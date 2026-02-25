@@ -1,12 +1,28 @@
 # .github/workflows/process-audio.yml
-name: Process Audio from YouTube
+name: Process Audio (YouTube/SoundCloud/MP3)
 
 on:
   workflow_dispatch:
     inputs:
-      youtube_url:
-        description: 'YouTube URL'
+      source_type:
+        description: 'Source type (youtube/soundcloud/mp3)'
         required: true
+        type: choice
+        options:
+          - youtube
+          - soundcloud
+          - mp3
+      source_url:
+        description: 'URL (for YouTube/SoundCloud)'
+        required: false
+        type: string
+      cookies_content:
+        description: 'YouTube cookies (optional)'
+        required: false
+        type: string
+      mp3_file_url:
+        description: 'MP3 file URL (if source_type=mp3)'
+        required: false
         type: string
       speed:
         description: 'Speed (0.5-5.0)'
@@ -43,25 +59,40 @@ jobs:
       - name: Install FFmpeg
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg bc
       
-      - name: Install yt-dlp
+      - name: Install yt-dlp (for YouTube/SoundCloud)
+        if: inputs.source_type != 'mp3'
         run: |
           sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
           sudo chmod a+rx /usr/local/bin/yt-dlp
-          yt-dlp --version
       
       - name: Create temp directory
         run: mkdir -p temp
       
+      # ===== SOURCE: YOUTUBE =====
       - name: Download from YouTube
-        id: download
+        if: inputs.source_type == 'youtube'
+        id: download_youtube
         run: |
-          echo "Downloading from: ${{ github.event.inputs.youtube_url }}"
           cd temp
-          yt-dlp -x --audio-format mp3 --audio-quality 0 -o "%(title)s.%(ext)s" "${{ github.event.inputs.youtube_url }}" --print-json > info.json
           
-          # Get filename and title
+          # Setup cookies if provided
+          if [ -n "${{ inputs.cookies_content }}" ]; then
+            echo "${{ inputs.cookies_content }}" > cookies.txt
+            COOKIES_OPT="--cookies cookies.txt"
+          else
+            COOKIES_OPT=""
+          fi
+          
+          # Download with yt-dlp
+          yt-dlp $COOKIES_OPT \
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            -x --audio-format mp3 --audio-quality 0 \
+            -o "%(title)s.%(ext)s" \
+            "${{ inputs.source_url }}" \
+            --print-json > info.json
+          
           FILENAME=$(ls *.mp3 | head -1)
           TITLE=$(cat info.json | jq -r '.title')
           DURATION=$(cat info.json | jq -r '.duration')
@@ -69,42 +100,96 @@ jobs:
           echo "filename=$FILENAME" >> $GITHUB_OUTPUT
           echo "title=$TITLE" >> $GITHUB_OUTPUT
           echo "duration=$DURATION" >> $GITHUB_OUTPUT
+          echo "input_file=temp/$FILENAME" >> $GITHUB_OUTPUT
           cd ..
       
+      # ===== SOURCE: SOUNDCLOUD =====
+      - name: Download from SoundCloud
+        if: inputs.source_type == 'soundcloud'
+        id: download_soundcloud
+        run: |
+          cd temp
+          
+          # SoundCloud biasanya tidak perlu cookies
+          yt-dlp \
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            -x --audio-format mp3 --audio-quality 0 \
+            -o "%(title)s.%(ext)s" \
+            "${{ inputs.source_url }}" \
+            --print-json > info.json
+          
+          FILENAME=$(ls *.mp3 | head -1)
+          TITLE=$(cat info.json | jq -r '.title')
+          DURATION=$(cat info.json | jq -r '.duration')
+          
+          echo "filename=$FILENAME" >> $GITHUB_OUTPUT
+          echo "title=$TITLE" >> $GITHUB_OUTPUT
+          echo "duration=$DURATION" >> $GITHUB_OUTPUT
+          echo "input_file=temp/$FILENAME" >> $GITHUB_OUTPUT
+          cd ..
+      
+      # ===== SOURCE: MP3 DIRECT =====
+      - name: Download MP3 from URL
+        if: inputs.source_type == 'mp3'
+        id: download_mp3
+        run: |
+          cd temp
+          
+          # Download MP3 from provided URL
+          curl -L "${{ inputs.mp3_file_url }}" -o input.mp3
+          
+          # Try to get title from URL or use filename
+          FILENAME="input.mp3"
+          TITLE=$(basename "${{ inputs.mp3_file_url }}" | sed 's/\.[^.]*$//')
+          
+          # Get duration with ffprobe
+          DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 input.mp3)
+          
+          echo "filename=$FILENAME" >> $GITHUB_OUTPUT
+          echo "title=$TITLE" >> $GITHUB_OUTPUT
+          echo "duration=$DURATION" >> $GITHUB_OUTPUT
+          echo "input_file=temp/$FILENAME" >> $GITHUB_OUTPUT
+          cd ..
+      
+      # ===== PROCESS AUDIO (SAMA UNTUK SEMUA) =====
       - name: Process Audio with FFmpeg
         id: process
         run: |
           cd temp
-          INPUT_FILE="${{ steps.download.outputs.filename }}"
-          OUTPUT_FILE="processed_${{ github.event.inputs.job_id }}.mp3"
+          
+          # Determine input file based on source
+          if [ "${{ inputs.source_type }}" == "youtube" ]; then
+            INPUT_FILE="${{ steps.download_youtube.outputs.filename }}"
+          elif [ "${{ inputs.source_type }}" == "soundcloud" ]; then
+            INPUT_FILE="${{ steps.download_soundcloud.outputs.filename }}"
+          else
+            INPUT_FILE="input.mp3"
+          fi
+          
+          OUTPUT_FILE="processed_${{ inputs.job_id }}.mp3"
           
           # Speed filter (handle >2.0)
-          SPEED="${{ github.event.inputs.speed }}"
+          SPEED="${{ inputs.speed }}"
           if (( $(echo "$SPEED > 2.0" | bc -l) )); then
-            # Multiple atempo for >2.0
             FILTERS=""
             REMAINING=$SPEED
             while (( $(echo "$REMAINING > 2.0" | bc -l) )); do
               FILTERS="${FILTERS}atempo=2.0,"
               REMAINING=$(echo "$REMAINING / 2.0" | bc -l)
             done
-            if (( $(echo "$REMAINING > 0.5" | bc -l) )); then
-              FILTERS="${FILTERS}atempo=$REMAINING"
-            else
-              FILTERS="${FILTERS%,}"
-            fi
+            FILTERS="${FILTERS}atempo=$REMAINING"
             SPEED_FILTER=$FILTERS
           else
             SPEED_FILTER="atempo=$SPEED"
           fi
           
           # Amplify in dB
-          VOLUME=$(echo "e(l(10)*${{ github.event.inputs.amplify }}/20)" | bc -l)
+          VOLUME=$(echo "e(l(10)*${{ inputs.amplify }}/20)" | bc -l)
           
           # Process with FFmpeg
           ffmpeg -i "$INPUT_FILE" \
             -filter:a "$SPEED_FILTER,volume=$VOLUME" \
-            -t ${{ github.event.inputs.max_duration }} \
+            -t ${{ inputs.max_duration }} \
             -c:a libmp3lame -b:a 128k \
             -y "$OUTPUT_FILE"
           
@@ -115,17 +200,29 @@ jobs:
           echo "new_duration=$NEW_DURATION" >> $GITHUB_OUTPUT
           cd ..
       
+      # ===== UPLOAD TO WEBHOOK =====
       - name: Upload to webhook
         run: |
           cd temp
           
+          # Determine title based on source
+          if [ "${{ inputs.source_type }}" == "youtube" ]; then
+            TITLE="${{ steps.download_youtube.outputs.title }}"
+          elif [ "${{ inputs.source_type }}" == "soundcloud" ]; then
+            TITLE="${{ steps.download_soundcloud.outputs.title }}"
+          else
+            TITLE="${{ steps.download_mp3.outputs.title }}"
+          fi
+          
           # Kirim file ke callback URL
-          curl -X POST "${{ github.event.inputs.callback_url }}" \
-            -F "job_id=${{ github.event.inputs.job_id }}" \
+          curl -X POST "${{ inputs.callback_url }}" \
+            -F "job_id=${{ inputs.job_id }}" \
             -F "audio_file=@${{ steps.process.outputs.output_file }}" \
-            -F "title=${{ steps.download.outputs.title }}" \
+            -F "title=$TITLE" \
+            -F "source_type=${{ inputs.source_type }}" \
             -F "duration=${{ steps.process.outputs.new_duration }}" \
-            -F "original_duration=${{ steps.download.outputs.duration }}"
+            -F "settings_speed=${{ inputs.speed }}" \
+            -F "settings_amplify=${{ inputs.amplify }}"
           
           cd ..
       
