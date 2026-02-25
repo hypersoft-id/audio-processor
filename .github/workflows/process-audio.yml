@@ -16,7 +16,7 @@ on:
         required: false
         type: string
       cookies_content:
-        description: 'YouTube cookies (optional)'
+        description: 'YouTube cookies (paste disini)'
         required: false
         type: string
       mp3_file_url:
@@ -55,49 +55,127 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
       
-      # ===== SETUP FFMPEG (CACHED OTOMATIS) =====
+      # ===== SETUP FFMPEG (CACHED) =====
       - name: Setup FFmpeg
         uses: FedericoCarboni/setup-ffmpeg@v3
         id: setup-ffmpeg
         with:
           ffmpeg-version: release
       
-      # ===== INSTALL yt-dlp (sekali aja, gak perlu caching) =====
+      # ===== CACHE UNTUK yt-dlp =====
+      - name: Cache yt-dlp
+        id: cache-yt-dlp
+        uses: actions/cache@v3
+        with:
+          path: /usr/local/bin/yt-dlp
+          key: ${{ runner.os }}-yt-dlp-${{ hashFiles('**/yt-dlp-version.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-yt-dlp-
+      
+      # ===== INSTALL yt-dlp (HANYA JIKA TIDAK DI CACHE) =====
       - name: Install yt-dlp
-        if: inputs.source_type != 'mp3'
+        if: steps.cache-yt-dlp.outputs.cache-hit != 'true' && inputs.source_type != 'mp3'
         run: |
+          echo "Installing yt-dlp (not in cache)..."
           sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
           sudo chmod a+rx /usr/local/bin/yt-dlp
+          /usr/local/bin/yt-dlp --version > yt-dlp-version.txt
+      
+      - name: Verify yt-dlp
+        if: inputs.source_type != 'mp3'
+        run: |
+          echo "yt-dlp version:"
+          /usr/local/bin/yt-dlp --version
       
       - name: Create temp directory
         run: mkdir -p temp
       
-      # ===== SOURCE: YOUTUBE =====
+      # ===== SOURCE: YOUTUBE (DENGAN PERBAIKAN COOKIES) =====
       - name: Download from YouTube
         if: inputs.source_type == 'youtube'
         id: download_youtube
+        env:
+          COOKIES_CONTENT: ${{ inputs.cookies_content }}
+          YOUTUBE_URL: ${{ inputs.source_url }}
         run: |
           cd temp
           
-          # Setup cookies if provided
-          if [ -n "${{ inputs.cookies_content }}" ]; then
-            echo "${{ inputs.cookies_content }}" > cookies.txt
+          echo "=== YOUTUBE DOWNLOAD DEBUG ==="
+          echo "URL: $YOUTUBE_URL"
+          
+          # CEK COOKIES
+          if [ -n "$COOKIES_CONTENT" ]; then
+            echo "✅ Cookies provided, length: ${#COOKIES_CONTENT} characters"
+            
+            # Simpan cookies ke file dengan format yang benar
+            # Pastikan menggunakan line endings yang benar
+            printf "%s\n" "$COOKIES_CONTENT" > cookies.txt
+            
+            # Tampilkan info file cookies
+            echo "📄 Cookies file info:"
+            ls -la cookies.txt
+            echo "📝 First 3 lines of cookies file:"
+            head -3 cookies.txt
+            echo "📝 Last 3 lines of cookies file:"
+            tail -3 cookies.txt
+            
+            # Validasi format Netscape
+            if grep -q "^# Netscape" cookies.txt; then
+              echo "✅ Cookies format: Netscape (valid)"
+            else
+              echo "⚠️ Warning: Cookies may not be in Netscape format"
+            fi
+            
             COOKIES_OPT="--cookies cookies.txt"
           else
+            echo "❌ No cookies provided"
             COOKIES_OPT=""
           fi
           
-          # Download with yt-dlp
+          echo "======================"
+          
+          # Download dengan yt-dlp (dengan verbose)
+          echo "🚀 Starting download..."
           yt-dlp $COOKIES_OPT \
-            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-            -x --audio-format mp3 --audio-quality 0 \
-            -o "%(title)s.%(ext)s" \
-            "${{ inputs.source_url }}" \
-            --print-json > info.json
+            --verbose \
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+            --extract-audio \
+            --audio-format mp3 \
+            --audio-quality 0 \
+            --output "%(title)s.%(ext)s" \
+            "$YOUTUBE_URL" \
+            --print-json > info.json 2> yt-dlp-error.log || {
+              echo "❌ yt-dlp failed with exit code $?"
+              echo "=== ERROR LOG ==="
+              cat yt-dlp-error.log
+              echo "================"
+              exit 1
+            }
+          
+          echo "✅ Download completed successfully"
+          
+          # Cek file hasil download
+          MP3_FILES=$(ls *.mp3 2>/dev/null | wc -l)
+          if [ "$MP3_FILES" -eq 0 ]; then
+            echo "❌ No MP3 files found after download"
+            ls -la
+            exit 1
+          fi
           
           FILENAME=$(ls *.mp3 | head -1)
-          TITLE=$(cat info.json | jq -r '.title')
-          DURATION=$(cat info.json | jq -r '.duration')
+          echo "📁 Downloaded file: $FILENAME"
+          
+          # Parse JSON info
+          if [ -f info.json ]; then
+            TITLE=$(cat info.json | jq -r '.title' 2>/dev/null || echo "Unknown")
+            DURATION=$(cat info.json | jq -r '.duration' 2>/dev/null || echo "0")
+          else
+            TITLE="Unknown"
+            DURATION="0"
+          fi
+          
+          echo "📝 Title: $TITLE"
+          echo "⏱️ Duration: $DURATION seconds"
           
           echo "filename=$FILENAME" >> $GITHUB_OUTPUT
           echo "title=$TITLE" >> $GITHUB_OUTPUT
@@ -112,12 +190,18 @@ jobs:
         run: |
           cd temp
           
+          echo "Downloading from SoundCloud: ${{ inputs.source_url }}"
+          
           yt-dlp \
             --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
             -x --audio-format mp3 --audio-quality 0 \
             -o "%(title)s.%(ext)s" \
             "${{ inputs.source_url }}" \
-            --print-json > info.json
+            --print-json > info.json 2> yt-dlp-error.log || {
+              echo "yt-dlp failed:"
+              cat yt-dlp-error.log
+              exit 1
+            }
           
           FILENAME=$(ls *.mp3 | head -1)
           TITLE=$(cat info.json | jq -r '.title')
@@ -136,15 +220,26 @@ jobs:
         run: |
           cd temp
           
+          echo "Downloading MP3 from: ${{ inputs.mp3_file_url }}"
+          
           # Download MP3 from provided URL
-          curl -L "${{ inputs.mp3_file_url }}" -o input.mp3
+          curl -L "${{ inputs.mp3_file_url }}" -o input.mp3 || {
+            echo "Failed to download MP3"
+            exit 1
+          }
+          
+          # Check if file was downloaded
+          if [ ! -f input.mp3 ]; then
+            echo "No file downloaded"
+            exit 1
+          fi
           
           # Try to get title from URL or use filename
           FILENAME="input.mp3"
           TITLE=$(basename "${{ inputs.mp3_file_url }}" | sed 's/\.[^.]*$//')
           
-          # Get duration with ffprobe (dari FFmpeg yang sudah di-cache)
-          DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 input.mp3)
+          # Get duration with ffprobe
+          DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 input.mp3 2>/dev/null || echo "0")
           
           echo "filename=$FILENAME" >> $GITHUB_OUTPUT
           echo "title=$TITLE" >> $GITHUB_OUTPUT
@@ -152,7 +247,7 @@ jobs:
           echo "input_file=temp/$FILENAME" >> $GITHUB_OUTPUT
           cd ..
       
-      # ===== PROCESS AUDIO (PAKAI FFMPEG YANG SUDAH DI-CACHE) =====
+      # ===== PROCESS AUDIO (SAMA UNTUK SEMUA) =====
       - name: Process Audio with FFmpeg
         id: process
         run: |
@@ -168,6 +263,9 @@ jobs:
           fi
           
           OUTPUT_FILE="processed_${{ inputs.job_id }}.mp3"
+          
+          echo "Processing: $INPUT_FILE → $OUTPUT_FILE"
+          echo "Settings: Speed=${{ inputs.speed }}, Amplify=${{ inputs.amplify }}dB, Max Duration=${{ inputs.max_duration }}s"
           
           # Speed filter (handle >2.0)
           SPEED="${{ inputs.speed }}"
@@ -187,12 +285,18 @@ jobs:
           # Amplify in dB
           VOLUME=$(echo "e(l(10)*${{ inputs.amplify }}/20)" | bc -l)
           
-          # Process with FFmpeg (sudah di PATH dari setup-ffmpeg)
+          echo "FFmpeg filter: $SPEED_FILTER, volume=$VOLUME"
+          
+          # Process with FFmpeg
           ffmpeg -i "$INPUT_FILE" \
             -filter:a "$SPEED_FILTER,volume=$VOLUME" \
             -t ${{ inputs.max_duration }} \
             -c:a libmp3lame -b:a 128k \
-            -y "$OUTPUT_FILE"
+            -y "$OUTPUT_FILE" 2> ffmpeg-error.log || {
+              echo "FFmpeg failed:"
+              cat ffmpeg-error.log
+              exit 1
+            }
           
           # Get duration of processed file
           NEW_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUTPUT_FILE")
@@ -215,6 +319,10 @@ jobs:
             TITLE="${{ steps.download_mp3.outputs.title }}"
           fi
           
+          echo "Uploading to webhook: ${{ inputs.callback_url }}"
+          echo "Job ID: ${{ inputs.job_id }}"
+          echo "Title: $TITLE"
+          
           # Kirim file ke callback URL
           curl -X POST "${{ inputs.callback_url }}" \
             -F "job_id=${{ inputs.job_id }}" \
@@ -223,9 +331,25 @@ jobs:
             -F "source_type=${{ inputs.source_type }}" \
             -F "duration=${{ steps.process.outputs.new_duration }}" \
             -F "settings_speed=${{ inputs.speed }}" \
-            -F "settings_amplify=${{ inputs.amplify }}"
+            -F "settings_amplify=${{ inputs.amplify }}" \
+            -F "settings_max_duration=${{ inputs.max_duration }}" || {
+              echo "Failed to upload to webhook"
+              exit 1
+            }
           
+          echo "✅ Upload completed"
           cd ..
+      
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: error-logs
+          path: |
+            temp/yt-dlp-error.log
+            temp/ffmpeg-error.log
+            temp/cookies.txt
+            temp/info.json
       
       - name: Cleanup
         if: always()
