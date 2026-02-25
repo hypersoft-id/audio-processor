@@ -1,0 +1,134 @@
+# .github/workflows/process-audio.yml
+name: Process Audio from YouTube
+
+on:
+  workflow_dispatch:
+    inputs:
+      youtube_url:
+        description: 'YouTube URL'
+        required: true
+        type: string
+      speed:
+        description: 'Speed (0.5-5.0)'
+        required: false
+        default: '2.3'
+        type: string
+      amplify:
+        description: 'Amplify dB (-20 to 20)'
+        required: false
+        default: '-4'
+        type: string
+      max_duration:
+        description: 'Max Duration (seconds)'
+        required: false
+        default: '360'
+        type: string
+      job_id:
+        description: 'Job ID from web'
+        required: true
+        type: string
+      callback_url:
+        description: 'Webhook callback URL'
+        required: true
+        type: string
+
+jobs:
+  process-audio:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+      
+      - name: Install yt-dlp
+        run: |
+          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+          sudo chmod a+rx /usr/local/bin/yt-dlp
+          yt-dlp --version
+      
+      - name: Create temp directory
+        run: mkdir -p temp
+      
+      - name: Download from YouTube
+        id: download
+        run: |
+          echo "Downloading from: ${{ github.event.inputs.youtube_url }}"
+          cd temp
+          yt-dlp -x --audio-format mp3 --audio-quality 0 -o "%(title)s.%(ext)s" "${{ github.event.inputs.youtube_url }}" --print-json > info.json
+          
+          # Get filename and title
+          FILENAME=$(ls *.mp3 | head -1)
+          TITLE=$(cat info.json | jq -r '.title')
+          DURATION=$(cat info.json | jq -r '.duration')
+          
+          echo "filename=$FILENAME" >> $GITHUB_OUTPUT
+          echo "title=$TITLE" >> $GITHUB_OUTPUT
+          echo "duration=$DURATION" >> $GITHUB_OUTPUT
+          cd ..
+      
+      - name: Process Audio with FFmpeg
+        id: process
+        run: |
+          cd temp
+          INPUT_FILE="${{ steps.download.outputs.filename }}"
+          OUTPUT_FILE="processed_${{ github.event.inputs.job_id }}.mp3"
+          
+          # Speed filter (handle >2.0)
+          SPEED="${{ github.event.inputs.speed }}"
+          if (( $(echo "$SPEED > 2.0" | bc -l) )); then
+            # Multiple atempo for >2.0
+            FILTERS=""
+            REMAINING=$SPEED
+            while (( $(echo "$REMAINING > 2.0" | bc -l) )); do
+              FILTERS="${FILTERS}atempo=2.0,"
+              REMAINING=$(echo "$REMAINING / 2.0" | bc -l)
+            done
+            if (( $(echo "$REMAINING > 0.5" | bc -l) )); then
+              FILTERS="${FILTERS}atempo=$REMAINING"
+            else
+              FILTERS="${FILTERS%,}"
+            fi
+            SPEED_FILTER=$FILTERS
+          else
+            SPEED_FILTER="atempo=$SPEED"
+          fi
+          
+          # Amplify in dB
+          VOLUME=$(echo "e(l(10)*${{ github.event.inputs.amplify }}/20)" | bc -l)
+          
+          # Process with FFmpeg
+          ffmpeg -i "$INPUT_FILE" \
+            -filter:a "$SPEED_FILTER,volume=$VOLUME" \
+            -t ${{ github.event.inputs.max_duration }} \
+            -c:a libmp3lame -b:a 128k \
+            -y "$OUTPUT_FILE"
+          
+          # Get duration of processed file
+          NEW_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUTPUT_FILE")
+          
+          echo "output_file=$OUTPUT_FILE" >> $GITHUB_OUTPUT
+          echo "new_duration=$NEW_DURATION" >> $GITHUB_OUTPUT
+          cd ..
+      
+      - name: Upload to webhook
+        run: |
+          cd temp
+          
+          # Kirim file ke callback URL
+          curl -X POST "${{ github.event.inputs.callback_url }}" \
+            -F "job_id=${{ github.event.inputs.job_id }}" \
+            -F "audio_file=@${{ steps.process.outputs.output_file }}" \
+            -F "title=${{ steps.download.outputs.title }}" \
+            -F "duration=${{ steps.process.outputs.new_duration }}" \
+            -F "original_duration=${{ steps.download.outputs.duration }}"
+          
+          cd ..
+      
+      - name: Cleanup
+        if: always()
+        run: rm -rf temp/*
