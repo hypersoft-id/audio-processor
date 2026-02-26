@@ -1,22 +1,27 @@
-name: Process Audio (TikTok/SoundCloud/MP3)
+name: Process Audio (YouTube/TikTok/SoundCloud/MP3)
 
 on:
   workflow_dispatch:
     inputs:
       source_type:
-        description: 'Source type (tiktok/soundcloud/mp3)'
+        description: 'Source type (youtube/tiktok/soundcloud/mp3)'
         required: true
         type: choice
         options:
+          - youtube
           - tiktok
           - soundcloud
           - mp3
       url:
-        description: 'URL (for TikTok/SoundCloud)'
+        description: 'URL (for YouTube/TikTok/SoundCloud)'
         required: false
         type: string
       mp3_file_url:
         description: 'MP3 file URL (if source_type=mp3)'
+        required: false
+        type: string
+      cookies:
+        description: 'YouTube cookies (Netscape format)'
         required: false
         type: string
       speed:
@@ -46,100 +51,139 @@ on:
 jobs:
   process-audio:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
-      # ===== SETUP DEPENDENCIES =====
+
       - name: Setup FFmpeg
         uses: FedericoCarboni/setup-ffmpeg@v3
-        id: setup-ffmpeg
-      
+
       - name: Install yt-dlp
-        if: inputs.source_type != 'mp3'
         run: |
           pip install yt-dlp
-      
+
+      - name: Install bc (for calculations)
+        run: sudo apt-get install -y bc
+
       - name: Create temp directory
         run: mkdir -p temp
-      
+
+      # ===== SOURCE: YOUTUBE =====
+      - name: Download from YouTube
+        if: inputs.source_type == 'youtube'
+        id: download_youtube
+        run: |
+          cd temp
+          echo "Downloading from YouTube: ${{ inputs.url }}"
+
+          # Save cookies if provided
+          if [ -n "${{ inputs.cookies }}" ]; then
+            echo "${{ inputs.cookies }}" > cookies.txt
+            COOKIES_OPT="--cookies cookies.txt"
+          else
+            COOKIES_OPT=""
+          fi
+
+          # Download with yt-dlp (download as best audio, we'll convert later)
+          yt-dlp $COOKIES_OPT \
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            --extract-audio \
+            --audio-format mp3 \
+            --audio-quality 0 \
+            --output "%(title)s.%(ext)s" \
+            "${{ inputs.url }}" \
+            --print-json > info.json
+
+          FILENAME=$(ls *.mp3 | head -1)
+          TITLE=$(cat info.json | jq -r '.title')
+          DURATION=$(cat info.json | jq -r '.duration')
+
+          echo "filename=$FILENAME" >> $GITHUB_OUTPUT
+          echo "title=$TITLE" >> $GITHUB_OUTPUT
+          echo "duration=$DURATION" >> $GITHUB_OUTPUT
+          cd ..
+
       # ===== SOURCE: TIKTOK =====
       - name: Download from TikTok
         if: inputs.source_type == 'tiktok'
         id: download_tiktok
         run: |
           cd temp
-          echo "🚀 Downloading TikTok: ${{ inputs.url }}"
-          
-          # TikTok tidak perlu cookies
-          yt-dlp --extract-audio \
+          echo "Downloading from TikTok: ${{ inputs.url }}"
+
+          yt-dlp \
+            --user-agent "Mozilla/5.0" \
+            --extract-audio \
             --audio-format mp3 \
             --audio-quality 0 \
             --output "%(title)s.%(ext)s" \
             "${{ inputs.url }}" \
             --print-json > info.json
-          
+
           FILENAME=$(ls *.mp3 | head -1)
           TITLE=$(cat info.json | jq -r '.title')
           DURATION=$(cat info.json | jq -r '.duration')
-          
-          echo "✅ Downloaded: $TITLE"
+
           echo "filename=$FILENAME" >> $GITHUB_OUTPUT
           echo "title=$TITLE" >> $GITHUB_OUTPUT
           echo "duration=$DURATION" >> $GITHUB_OUTPUT
           cd ..
-      
+
       # ===== SOURCE: SOUNDCLOUD =====
       - name: Download from SoundCloud
         if: inputs.source_type == 'soundcloud'
         id: download_soundcloud
         run: |
           cd temp
-          echo "🚀 Downloading SoundCloud: ${{ inputs.url }}"
-          
-          yt-dlp --extract-audio \
+          echo "Downloading from SoundCloud: ${{ inputs.url }}"
+
+          yt-dlp \
+            --user-agent "Mozilla/5.0" \
+            --extract-audio \
             --audio-format mp3 \
             --audio-quality 0 \
             --output "%(title)s.%(ext)s" \
             "${{ inputs.url }}" \
             --print-json > info.json
-          
+
           FILENAME=$(ls *.mp3 | head -1)
           TITLE=$(cat info.json | jq -r '.title')
           DURATION=$(cat info.json | jq -r '.duration')
-          
+
           echo "filename=$FILENAME" >> $GITHUB_OUTPUT
           echo "title=$TITLE" >> $GITHUB_OUTPUT
           echo "duration=$DURATION" >> $GITHUB_OUTPUT
           cd ..
-      
+
       # ===== SOURCE: MP3 DIRECT =====
       - name: Download MP3 from URL
         if: inputs.source_type == 'mp3'
         id: download_mp3
         run: |
           cd temp
-          echo "🚀 Downloading MP3: ${{ inputs.mp3_file_url }}"
-          
+          echo "Downloading MP3: ${{ inputs.mp3_file_url }}"
+
           curl -L "${{ inputs.mp3_file_url }}" -o input.mp3
-          
-          # Get duration with ffprobe
+
           DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 input.mp3 2>/dev/null || echo "0")
-          
+
           echo "filename=input.mp3" >> $GITHUB_OUTPUT
           echo "title=uploaded_audio" >> $GITHUB_OUTPUT
           echo "duration=$DURATION" >> $GITHUB_OUTPUT
           cd ..
-      
-      # ===== PROCESS AUDIO (SAMA UNTUK SEMUA) =====
-      - name: Process Audio with FFmpeg
+
+      # ===== PROCESS AUDIO TO OGG =====
+      - name: Process Audio to OGG with FFmpeg
         id: process
         run: |
           cd temp
-          
-          # Tentukan file input
-          if [ "${{ inputs.source_type }}" == "tiktok" ]; then
+
+          # Determine input file
+          if [ "${{ inputs.source_type }}" == "youtube" ]; then
+            INPUT_FILE="${{ steps.download_youtube.outputs.filename }}"
+            TITLE="${{ steps.download_youtube.outputs.title }}"
+          elif [ "${{ inputs.source_type }}" == "tiktok" ]; then
             INPUT_FILE="${{ steps.download_tiktok.outputs.filename }}"
             TITLE="${{ steps.download_tiktok.outputs.title }}"
           elif [ "${{ inputs.source_type }}" == "soundcloud" ]; then
@@ -149,12 +193,13 @@ jobs:
             INPUT_FILE="input.mp3"
             TITLE="${{ steps.download_mp3.outputs.title }}"
           fi
-          
-          OUTPUT_FILE="processed_${{ inputs.job_id }}.mp3"
-          
+
+          # Output file in OGG format (Roblox compatible)
+          OUTPUT_FILE="processed_${{ inputs.job_id }}.ogg"
+
           echo "🎵 Processing: $INPUT_FILE → $OUTPUT_FILE"
           echo "⚙️ Settings: Speed=${{ inputs.speed }}, Amplify=${{ inputs.amplify }}dB, Max=${{ inputs.max_duration }}s"
-          
+
           # Speed filter (handle >2.0)
           SPEED="${{ inputs.speed }}"
           if (( $(echo "$SPEED > 2.0" | bc -l) )); then
@@ -169,48 +214,83 @@ jobs:
           else
             SPEED_FILTER="atempo=$SPEED"
           fi
-          
-          # Amplify in dB
+
+          # Amplify in dB to linear
           VOLUME=$(echo "e(l(10)*${{ inputs.amplify }}/20)" | bc -l)
-          
-          # Process with FFmpeg
+
+          # Process with FFmpeg to OGG (Roblox format)
+          # OGG with libvorbis codec at 128k bitrate
           ffmpeg -i "$INPUT_FILE" \
             -filter:a "$SPEED_FILTER,volume=$VOLUME" \
             -t ${{ inputs.max_duration }} \
-            -c:a libmp3lame -b:a 128k \
-            -y "$OUTPUT_FILE"
-          
+            -c:a libvorbis \
+            -b:a 128k \
+            -y "$OUTPUT_FILE" 2> ffmpeg-error.log || {
+              echo "❌ FFmpeg failed:"
+              cat ffmpeg-error.log
+              exit 1
+            }
+
+          # Get duration of processed file
           NEW_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUTPUT_FILE")
-          
+
+          # Get file size
+          FILE_SIZE=$(stat -c%s "$OUTPUT_FILE")
+
+          echo "✅ Processing complete!"
+          echo "📊 Duration: $NEW_DURATION seconds"
+          echo "📦 Size: $FILE_SIZE bytes"
+
           echo "output_file=$OUTPUT_FILE" >> $GITHUB_OUTPUT
           echo "new_duration=$NEW_DURATION" >> $GITHUB_OUTPUT
+          echo "file_size=$FILE_SIZE" >> $GITHUB_OUTPUT
           cd ..
-      
+
       # ===== UPLOAD TO WEBHOOK =====
       - name: Upload to webhook
         run: |
           cd temp
-          
-          # Tentukan title
-          if [ "${{ inputs.source_type }}" == "tiktok" ]; then
+
+          # Determine title
+          if [ "${{ inputs.source_type }}" == "youtube" ]; then
+            TITLE="${{ steps.download_youtube.outputs.title }}"
+          elif [ "${{ inputs.source_type }}" == "tiktok" ]; then
             TITLE="${{ steps.download_tiktok.outputs.title }}"
           elif [ "${{ inputs.source_type }}" == "soundcloud" ]; then
             TITLE="${{ steps.download_soundcloud.outputs.title }}"
           else
             TITLE="MP3 Upload"
           fi
-          
+
           echo "📤 Uploading to callback: ${{ inputs.callback_url }}"
-          
+          echo "📁 File: ${{ steps.process.outputs.output_file }}"
+
+          # Upload OGG file
           curl -X POST "${{ inputs.callback_url }}" \
             -F "job_id=${{ inputs.job_id }}" \
             -F "audio_file=@${{ steps.process.outputs.output_file }}" \
             -F "title=$TITLE" \
             -F "source_type=${{ inputs.source_type }}" \
-            -F "duration=${{ steps.process.outputs.new_duration }}"
-          
+            -F "duration=${{ steps.process.outputs.new_duration }}" \
+            -F "file_size=${{ steps.process.outputs.file_size }}" \
+            -F "format=ogg" \
+            -F "settings_speed=${{ inputs.speed }}" \
+            -F "settings_amplify=${{ inputs.amplify }}" \
+            -F "settings_max_duration=${{ inputs.max_duration }}"
+
+          echo "✅ Upload completed"
           cd ..
-      
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-logs
+          path: |
+            temp/ffmpeg-error.log
+            temp/info.json
+            temp/cookies.txt
+
       - name: Cleanup
         if: always()
         run: rm -rf temp/*
