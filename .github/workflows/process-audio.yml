@@ -59,12 +59,19 @@ jobs:
       - name: Setup FFmpeg
         uses: FedericoCarboni/setup-ffmpeg@v3
 
-      - name: Install yt-dlp
-        run: |
-          pip install yt-dlp
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-yt-dlp
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
-      - name: Install bc (for calculations)
-        run: sudo apt-get install -y bc
+      - name: Install dependencies
+        run: |
+          pip install yt-dlp &
+          sudo apt-get install -y bc &
+          wait
 
       - name: Create temp directory
         run: mkdir -p temp
@@ -77,7 +84,6 @@ jobs:
           cd temp
           echo "Downloading from YouTube: ${{ inputs.url }}"
 
-          # Save cookies if provided
           if [ -n "${{ inputs.cookies }}" ]; then
             echo "${{ inputs.cookies }}" > cookies.txt
             COOKIES_OPT="--cookies cookies.txt"
@@ -85,7 +91,6 @@ jobs:
             COOKIES_OPT=""
           fi
 
-          # Download with yt-dlp (download as best audio, we'll convert later)
           yt-dlp $COOKIES_OPT \
             --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
             --extract-audio \
@@ -179,7 +184,6 @@ jobs:
         run: |
           cd temp
 
-          # Determine input file
           if [ "${{ inputs.source_type }}" == "youtube" ]; then
             INPUT_FILE="${{ steps.download_youtube.outputs.filename }}"
             TITLE="${{ steps.download_youtube.outputs.title }}"
@@ -194,13 +198,11 @@ jobs:
             TITLE="${{ steps.download_mp3.outputs.title }}"
           fi
 
-          # Output file in OGG format (Roblox compatible)
           OUTPUT_FILE="processed_${{ inputs.job_id }}.ogg"
 
           echo "🎵 Processing: $INPUT_FILE → $OUTPUT_FILE"
           echo "⚙️ Settings: Speed=${{ inputs.speed }}, Amplify=${{ inputs.amplify }}dB, Max=${{ inputs.max_duration }}s"
 
-          # Speed filter (handle >2.0)
           SPEED="${{ inputs.speed }}"
           if (( $(echo "$SPEED > 2.0" | bc -l) )); then
             FILTERS=""
@@ -215,11 +217,8 @@ jobs:
             SPEED_FILTER="atempo=$SPEED"
           fi
 
-          # Amplify in dB to linear
           VOLUME=$(echo "e(l(10)*${{ inputs.amplify }}/20)" | bc -l)
 
-          # Process with FFmpeg to OGG (Roblox format)
-          # OGG with libvorbis codec at 128k bitrate
           ffmpeg -i "$INPUT_FILE" \
             -filter:a "$SPEED_FILTER,volume=$VOLUME" \
             -t ${{ inputs.max_duration }} \
@@ -231,10 +230,7 @@ jobs:
               exit 1
             }
 
-          # Get duration of processed file
           NEW_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUTPUT_FILE")
-
-          # Get file size
           FILE_SIZE=$(stat -c%s "$OUTPUT_FILE")
 
           echo "✅ Processing complete!"
@@ -251,7 +247,6 @@ jobs:
         run: |
           cd temp
 
-          # Determine title
           if [ "${{ inputs.source_type }}" == "youtube" ]; then
             TITLE="${{ steps.download_youtube.outputs.title }}"
           elif [ "${{ inputs.source_type }}" == "tiktok" ]; then
@@ -263,9 +258,7 @@ jobs:
           fi
 
           echo "📤 Uploading to callback: ${{ inputs.callback_url }}"
-          echo "📁 File: ${{ steps.process.outputs.output_file }}"
 
-          # Upload OGG file
           curl -X POST "${{ inputs.callback_url }}" \
             -F "job_id=${{ inputs.job_id }}" \
             -F "audio_file=@${{ steps.process.outputs.output_file }}" \
