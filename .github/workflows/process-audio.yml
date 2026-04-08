@@ -20,6 +20,11 @@ on:
         description: 'MP3 file URL (if source_type=mp3)'
         required: false
         type: string
+      input_format:
+        description: 'Input file format (mp3/ogg/wav/flac)'
+        required: false
+        default: 'mp3'
+        type: string
       cookies:
         description: 'YouTube cookies (Netscape format)'
         required: false
@@ -161,19 +166,34 @@ jobs:
           echo "duration=$DURATION" >> $GITHUB_OUTPUT
           cd ..
 
-      # ===== SOURCE: MP3 DIRECT =====
-      - name: Download MP3 from URL
+      # ===== SOURCE: MP3/OGG/WAV/FLAC DIRECT =====
+      - name: Download audio from URL
         if: inputs.source_type == 'mp3'
         id: download_mp3
         run: |
           cd temp
-          echo "Downloading MP3: ${{ inputs.mp3_file_url }}"
+          INPUT_FORMAT="${{ inputs.input_format }}"
+          INPUT_FILE="input.${INPUT_FORMAT}"
 
-          curl -L "${{ inputs.mp3_file_url }}" -o input.mp3
+          echo "⬇️ Downloading audio ($INPUT_FORMAT): ${{ inputs.mp3_file_url }}"
 
-          DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 input.mp3 2>/dev/null || echo "0")
+          HTTP_STATUS=$(curl -L -w "%{http_code}" -o "$INPUT_FILE" "${{ inputs.mp3_file_url }}")
+          echo "HTTP Status: $HTTP_STATUS"
 
-          echo "filename=input.mp3" >> $GITHUB_OUTPUT
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "❌ Download failed with HTTP status $HTTP_STATUS"
+            exit 1
+          fi
+
+          FILE_SIZE=$(stat -c%s "$INPUT_FILE")
+          echo "Downloaded size: $FILE_SIZE bytes"
+          file "$INPUT_FILE"
+
+          DURATION=$(ffprobe -v error -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 "$INPUT_FILE" 2>/dev/null || echo "0")
+          echo "Duration: $DURATION seconds"
+
+          echo "filename=$INPUT_FILE" >> $GITHUB_OUTPUT
           echo "title=uploaded_audio" >> $GITHUB_OUTPUT
           echo "duration=$DURATION" >> $GITHUB_OUTPUT
           cd ..
@@ -194,7 +214,7 @@ jobs:
             INPUT_FILE="${{ steps.download_soundcloud.outputs.filename }}"
             TITLE="${{ steps.download_soundcloud.outputs.title }}"
           else
-            INPUT_FILE="input.mp3"
+            INPUT_FILE="${{ steps.download_mp3.outputs.filename }}"
             TITLE="${{ steps.download_mp3.outputs.title }}"
           fi
 
@@ -254,7 +274,7 @@ jobs:
           elif [ "${{ inputs.source_type }}" == "soundcloud" ]; then
             TITLE="${{ steps.download_soundcloud.outputs.title }}"
           else
-            TITLE="MP3 Upload"
+            TITLE="${{ steps.download_mp3.outputs.title }}"
           fi
 
           echo "📤 Uploading to callback: ${{ inputs.callback_url }}"
