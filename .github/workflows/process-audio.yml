@@ -56,7 +56,7 @@ on:
         type: string
       output_format:
         description: 'Format output (mp3/ogg/flac/wav)'
-        required: false  # 🔥 FIX: required:0 → required: false
+        required: false
         default: 'ogg'
         type: choice
         options:
@@ -353,11 +353,11 @@ jobs:
 
               ffmpeg -y -i "$INPUT_FILE" -ss "$START_IN" -t "$PART_IN_DURATION" \
                 -filter:a "$AUDIO_FILTER" $CODEC $EXTRA_OPTS -f "$FORMAT" \
-                -loglevel error \  # <-- TAMBAHKAN INI
+                -loglevel error \
                 "$OUTPUT_FILE" 2>> ffmpeg-error.log || {
-                    echo "❌ FFmpeg gagal di bagian $i"
-                    cat ffmpeg-error.log
-                    exit 1
+                  echo "❌ FFmpeg gagal di bagian $i"
+                  cat ffmpeg-error.log
+                  exit 1
                 }
 
               PART_REAL_DUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUTPUT_FILE" 2>/dev/null || echo "0")
@@ -370,6 +370,7 @@ jobs:
             echo "🔧 Memproses single file..."
 
             ffmpeg -y -i "$INPUT_FILE" -filter:a "$AUDIO_FILTER" $CODEC $EXTRA_OPTS -f "$FORMAT" \
+              -loglevel error \
               "$OUTPUT_FILE" 2>> ffmpeg-error.log || {
                 echo "❌ FFmpeg gagal"
                 cat ffmpeg-error.log
@@ -387,7 +388,7 @@ jobs:
           cd ..
 
       # ===================================================================
-      # UPLOAD semua bagian ke webhook callback (SEQUENTIAL - STABIL)
+      # UPLOAD ke Webhook
       # ===================================================================
       - name: Upload parts to webhook
         run: |
@@ -404,15 +405,12 @@ jobs:
           EXT="${{ steps.process.outputs.ext }}"
           echo "📤 Mengirim $PARTS bagian ke: ${{ inputs.callback_url }}"
 
-          FAILED_PARTS=0
-
           for (( i=0; i<PARTS; i++ )); do
             OUTPUT_FILE="part_${i}_${{ inputs.job_id }}.${EXT}"
 
             if [ ! -f "$OUTPUT_FILE" ]; then
               echo "❌ File tidak ditemukan: $OUTPUT_FILE"
-              FAILED_PARTS=$((FAILED_PARTS + 1))
-              continue
+              exit 1
             fi
 
             PART_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUTPUT_FILE" 2>/dev/null || echo "0")
@@ -420,59 +418,33 @@ jobs:
 
             echo "📤 Mengirim bagian $((i+1))/${PARTS}: $OUTPUT_FILE (${PART_DURATION}s, ${PART_SIZE} bytes)"
 
-            UPLOAD_SUCCESS=false
-            for attempt in 1 2 3; do
-              HTTP_RESP=$(curl -s -o /tmp/callback_response.json -w "%{http_code}" \
-                --max-time 60 \
-                --connect-timeout 10 \
-                -X POST "${{ inputs.callback_url }}" \
-                -F "job_id=${{ inputs.job_id }}" \
-                -F "audio_file=@${OUTPUT_FILE}" \
-                -F "title=${TITLE}" \
-                -F "source_type=${{ inputs.source_type }}" \
-                -F "duration=${PART_DURATION}" \
-                -F "part_index=${i}" \
-                -F "total_parts=${PARTS}" \
-                -F "file_size=${PART_SIZE}" \
-                -F "format=${EXT}" \
-                -F "settings_speed=${{ inputs.speed }}" \
-                -F "settings_amplify=${{ inputs.amplify }}" \
-                -F "settings_max_duration=${{ inputs.max_duration }}" \
-                -F "settings_auto_cut=${{ inputs.auto_cut }}")
-
-              echo "   Part $((i+1)) Attempt $attempt — HTTP $HTTP_RESP"
-              
-              if [[ "$HTTP_RESP" =~ ^2[0-9][0-9]$ ]]; then
-                echo "✅ Part $((i+1)) berhasil (HTTP $HTTP_RESP)"
-                UPLOAD_SUCCESS=true
-                break
-              elif [ "$attempt" -lt 3 ]; then
-                echo "⚠️ Retry dalam 5 detik..."
-                sleep 5
-              fi
-            done
-            
-            if [ "$UPLOAD_SUCCESS" = false ]; then
-              echo "❌ Part $((i+1)) gagal setelah 3 percobaan"
-              FAILED_PARTS=$((FAILED_PARTS + 1))
-            fi
-          done
-
-          if [ "$FAILED_PARTS" -gt 0 ]; then
-            echo "❌ $FAILED_PARTS dari $PARTS bagian gagal dikirim"
-            
-            curl -s -X POST "${{ inputs.callback_url }}" \
-              --max-time 10 \
-              --connect-timeout 5 \
+            HTTP_RESP=$(curl -s -o /tmp/callback_response.json -w "%{http_code}" \
+              --max-time 120 \
+              -X POST "${{ inputs.callback_url }}" \
               -F "job_id=${{ inputs.job_id }}" \
-              -F "workflow_status=failed" \
-              -F "error_message=Gagal upload $FAILED_PARTS dari $PARTS bagian" \
-              -F "failed_parts=$FAILED_PARTS" \
-              -F "total_parts=$PARTS" \
-              || true
+              -F "audio_file=@${OUTPUT_FILE}" \
+              -F "title=${TITLE}" \
+              -F "source_type=${{ inputs.source_type }}" \
+              -F "duration=${PART_DURATION}" \
+              -F "part_index=${i}" \
+              -F "total_parts=${PARTS}" \
+              -F "file_size=${PART_SIZE}" \
+              -F "format=${EXT}" \
+              -F "settings_speed=${{ inputs.speed }}" \
+              -F "settings_amplify=${{ inputs.amplify }}" \
+              -F "settings_max_duration=${{ inputs.max_duration }}" \
+              -F "settings_auto_cut=${{ inputs.auto_cut }}")
+
+            echo "   HTTP $HTTP_RESP"
             
-            exit 1
-          fi
+            if [[ ! "$HTTP_RESP" =~ ^2[0-9][0-9]$ ]]; then
+              echo "❌ Gagal upload bagian $((i+1)) (HTTP $HTTP_RESP)"
+              cat /tmp/callback_response.json || true
+              exit 1
+            fi
+            
+            echo "✅ Bagian $((i+1)) berhasil dikirim"
+          done
           
           echo "✅ Semua $PARTS bagian berhasil dikirim"
           cd ..
