@@ -353,10 +353,11 @@ jobs:
 
               ffmpeg -y -i "$INPUT_FILE" -ss "$START_IN" -t "$PART_IN_DURATION" \
                 -filter:a "$AUDIO_FILTER" $CODEC $EXTRA_OPTS -f "$FORMAT" \
+                -loglevel error \  # <-- TAMBAHKAN INI
                 "$OUTPUT_FILE" 2>> ffmpeg-error.log || {
-                  echo "❌ FFmpeg gagal di bagian $i"
-                  cat ffmpeg-error.log
-                  exit 1
+                    echo "❌ FFmpeg gagal di bagian $i"
+                    cat ffmpeg-error.log
+                    exit 1
                 }
 
               PART_REAL_DUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUTPUT_FILE" 2>/dev/null || echo "0")
