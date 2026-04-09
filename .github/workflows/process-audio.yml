@@ -56,7 +56,7 @@ on:
         type: string
       output_format:
         description: 'Format output (mp3/ogg/flac/wav)'
-        required: false
+        required:0
         default: 'ogg'
         type: choice
         options:
@@ -113,7 +113,6 @@ jobs:
         id: download_youtube
         run: |
           cd temp
-
           echo "▶️ Downloading from YouTube: ${{ inputs.url }}"
 
           if [ -n "${{ inputs.cookies }}" ]; then
@@ -123,7 +122,6 @@ jobs:
             COOKIES_OPT=""
           fi
 
-          # Ambil metadata dulu
           yt-dlp $COOKIES_OPT \
             --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
             --skip-download \
@@ -136,7 +134,6 @@ jobs:
           TITLE=$(jq -r '.title' info.json)
           DURATION=$(jq -r '.duration' info.json)
 
-          # Download audio
           yt-dlp $COOKIES_OPT \
             --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
             --extract-audio \
@@ -149,7 +146,6 @@ jobs:
             }
 
           FILENAME="audio.mp3"
-
           echo "filename=$FILENAME" >> $GITHUB_OUTPUT
           echo "title=$TITLE"       >> $GITHUB_OUTPUT
           echo "duration=$DURATION" >> $GITHUB_OUTPUT
@@ -163,7 +159,6 @@ jobs:
         id: download_tiktok
         run: |
           cd temp
-
           echo "▶️ Downloading from TikTok: ${{ inputs.url }}"
 
           yt-dlp \
@@ -190,7 +185,6 @@ jobs:
             }
 
           FILENAME="audio.mp3"
-
           echo "filename=$FILENAME" >> $GITHUB_OUTPUT
           echo "title=$TITLE"       >> $GITHUB_OUTPUT
           echo "duration=$DURATION" >> $GITHUB_OUTPUT
@@ -204,7 +198,6 @@ jobs:
         id: download_soundcloud
         run: |
           cd temp
-
           echo "▶️ Downloading from SoundCloud: ${{ inputs.url }}"
 
           yt-dlp \
@@ -231,7 +224,6 @@ jobs:
             }
 
           FILENAME="audio.mp3"
-
           echo "filename=$FILENAME" >> $GITHUB_OUTPUT
           echo "title=$TITLE"       >> $GITHUB_OUTPUT
           echo "duration=$DURATION" >> $GITHUB_OUTPUT
@@ -245,10 +237,8 @@ jobs:
         id: download_mp3
         run: |
           cd temp
-
           INPUT_FORMAT="${{ inputs.input_format }}"
           INPUT_FILE="input.${INPUT_FORMAT}"
-
           echo "⬇️ Downloading audio (${INPUT_FORMAT}): ${{ inputs.mp3_file_url }}"
 
           HTTP_STATUS=$(curl -L \
@@ -269,7 +259,6 @@ jobs:
           echo "Ukuran file: $FILE_SIZE bytes"
           file "$INPUT_FILE"
 
-          # Validasi file audio
           if ! ffprobe -v error -i "$INPUT_FILE" 2>/dev/null; then
             echo "❌ File bukan audio yang valid"
             exit 1
@@ -281,7 +270,6 @@ jobs:
             "$INPUT_FILE" 2>/dev/null || echo "0")
 
           echo "Durasi: $DURATION detik"
-
           echo "filename=$INPUT_FILE"             >> $GITHUB_OUTPUT
           echo "title=${{ inputs.file_title }}"   >> $GITHUB_OUTPUT
           echo "duration=$DURATION"               >> $GITHUB_OUTPUT
@@ -295,80 +283,33 @@ jobs:
         run: |
           cd temp
 
-          # ── Tentukan file input & metadata ──────────────────────────────
           case "${{ inputs.source_type }}" in
-            youtube)
-              INPUT_FILE="${{ steps.download_youtube.outputs.filename }}"
-              TITLE="${{ steps.download_youtube.outputs.title }}"
-              TOTAL_DURATION="${{ steps.download_youtube.outputs.duration }}"
-              ;;
-            tiktok)
-              INPUT_FILE="${{ steps.download_tiktok.outputs.filename }}"
-              TITLE="${{ steps.download_tiktok.outputs.title }}"
-              TOTAL_DURATION="${{ steps.download_tiktok.outputs.duration }}"
-              ;;
-            soundcloud)
-              INPUT_FILE="${{ steps.download_soundcloud.outputs.filename }}"
-              TITLE="${{ steps.download_soundcloud.outputs.title }}"
-              TOTAL_DURATION="${{ steps.download_soundcloud.outputs.duration }}"
-              ;;
-            mp3)
-              INPUT_FILE="${{ steps.download_mp3.outputs.filename }}"
-              TITLE="${{ steps.download_mp3.outputs.title }}"
-              TOTAL_DURATION="${{ steps.download_mp3.outputs.duration }}"
-              ;;
+            youtube)    INPUT_FILE="${{ steps.download_youtube.outputs.filename }}"; TITLE="${{ steps.download_youtube.outputs.title }}"; TOTAL_DURATION="${{ steps.download_youtube.outputs.duration }}" ;;
+            tiktok)     INPUT_FILE="${{ steps.download_tiktok.outputs.filename }}"; TITLE="${{ steps.download_tiktok.outputs.title }}"; TOTAL_DURATION="${{ steps.download_tiktok.outputs.duration }}" ;;
+            soundcloud) INPUT_FILE="${{ steps.download_soundcloud.outputs.filename }}"; TITLE="${{ steps.download_soundcloud.outputs.title }}"; TOTAL_DURATION="${{ steps.download_soundcloud.outputs.duration }}" ;;
+            mp3)        INPUT_FILE="${{ steps.download_mp3.outputs.filename }}"; TITLE="${{ steps.download_mp3.outputs.title }}"; TOTAL_DURATION="${{ steps.download_mp3.outputs.duration }}" ;;
           esac
 
           echo "📂 Input  : $INPUT_FILE"
           echo "🎵 Title  : $TITLE"
           echo "⏱ Durasi : ${TOTAL_DURATION}s"
 
-          # Validasi input file exists
           if [ ! -f "$INPUT_FILE" ]; then
             echo "❌ Input file tidak ditemukan: $INPUT_FILE"
             exit 1
           fi
 
-          # ── Codec output sesuai format ──────────────────────────────────
           OUTPUT_FORMAT="${{ inputs.output_format }}"
           case "$OUTPUT_FORMAT" in
-            mp3)
-              CODEC="-c:a libmp3lame -q:a 2"
-              EXT="mp3"
-              FORMAT="mp3"
-              EXTRA_OPTS=""
-              ;;
-            flac)
-              CODEC="-c:a flac"
-              EXT="flac"
-              FORMAT="flac"
-              EXTRA_OPTS=""
-              ;;
-            wav)
-              CODEC="-c:a pcm_s16le"
-              EXT="wav"
-              FORMAT="wav"
-              EXTRA_OPTS=""
-              ;;
-            ogg)
-              CODEC="-c:a libvorbis -b:a 128k"
-              EXT="ogg"
-              FORMAT="ogg"
-              EXTRA_OPTS="-ar 44100 -ac 2"
-              ;;
-            *)
-              CODEC="-c:a libvorbis -b:a 128k"
-              EXT="ogg"
-              FORMAT="ogg"
-              EXTRA_OPTS="-ar 44100 -ac 2"
-              ;;
+            mp3)  CODEC="-c:a libmp3lame -q:a 2" ; EXT="mp3"  ; FORMAT="mp3"  ; EXTRA_OPTS="" ;;
+            flac) CODEC="-c:a flac"               ; EXT="flac" ; FORMAT="flac" ; EXTRA_OPTS="" ;;
+            wav)  CODEC="-c:a pcm_s16le"          ; EXT="wav"  ; FORMAT="wav"  ; EXTRA_OPTS="" ;;
+            ogg|*) CODEC="-c:a libvorbis -b:a 128k"; EXT="ogg"  ; FORMAT="ogg"  ; EXTRA_OPTS="-ar 44100 -ac 2" ;;
           esac
           
-          echo "🎚 Output format: $OUTPUT_FORMAT, container: $FORMAT, extension: .$EXT"
+          echo "🎚 Output format: $OUTPUT_FORMAT, extension: .$EXT"
 
-          # ── Speed filter — tangani atempo > 2.0 dengan chaining ─────────
           SPEED="${{ inputs.speed }}"
-
           build_atempo() {
             local spd="$1"
             local filters=""
@@ -386,99 +327,58 @@ jobs:
           }
 
           SPEED_FILTER=$(build_atempo "$SPEED")
-          echo "⚡ Speed filter: $SPEED_FILTER"
-
-          # ── Volume (amplify dB → linear) ────────────────────────────────
           AMPLIFY="${{ inputs.amplify }}"
           VOLUME=$(echo "scale=6; e(l(10)*${AMPLIFY}/20)" | bc -l)
-          echo "🔊 Volume multiplier: $VOLUME (${AMPLIFY} dB)"
-
-          # ── Filter audio gabungan ───────────────────────────────────────
           AUDIO_FILTER="${SPEED_FILTER},volume=${VOLUME}"
-
-          # ── Hitung durasi output setelah speed ──────────────────────────
           ADJUSTED_DURATION=$(echo "scale=3; $TOTAL_DURATION / $SPEED" | bc -l)
+          
           echo "📏 Durasi setelah speed: ${ADJUSTED_DURATION}s"
-
           MAX_DURATION="${{ inputs.max_duration }}"
           AUTO_CUT="${{ inputs.auto_cut }}"
 
-          echo "✂️ Auto cut setting: $AUTO_CUT (max: ${MAX_DURATION}s)"
-
-          # ── AUTO CUT: bagi rata ke beberapa bagian ──────────────────────
-          if [ "$AUTO_CUT" == "true" ] && \
-             (( $(echo "$ADJUSTED_DURATION > $MAX_DURATION" | bc -l) )); then
-
-            # PARTS = ceil(ADJUSTED_DURATION / MAX_DURATION)
+          if [ "$AUTO_CUT" == "true" ] && (( $(echo "$ADJUSTED_DURATION > $MAX_DURATION" | bc -l) )); then
             PARTS=$(echo "scale=0; ($ADJUSTED_DURATION + $MAX_DURATION - 1) / $MAX_DURATION" | bc)
             PARTS=$(printf '%d' "$PARTS")
-
             PART_OUT_DURATION=$(echo "scale=3; $ADJUSTED_DURATION / $PARTS" | bc -l)
             PART_IN_DURATION=$(echo "scale=3; $PART_OUT_DURATION * $SPEED" | bc -l)
 
-            echo "✂️  Auto cut: ${ADJUSTED_DURATION}s → ${PARTS} bagian × ${PART_OUT_DURATION}s/bagian"
-            echo "   (Input slice per bagian: ${PART_IN_DURATION}s)"
-
-            echo "parts=$PARTS"                     >> $GITHUB_OUTPUT
+            echo "✂️ Auto cut: ${PARTS} bagian × ${PART_OUT_DURATION}s"
+            echo "parts=$PARTS" >> $GITHUB_OUTPUT
             echo "part_duration=$PART_OUT_DURATION" >> $GITHUB_OUTPUT
 
             for (( i=0; i<PARTS; i++ )); do
               START_IN=$(echo "scale=3; $i * $PART_IN_DURATION" | bc -l)
               OUTPUT_FILE="part_${i}_${{ inputs.job_id }}.${EXT}"
+              echo "🔧 Memproses bagian $((i+1))/${PARTS}"
 
-              echo "🔧 Memproses bagian $((i+1))/${PARTS} | start_in=${START_IN}s durasi_in=${PART_IN_DURATION}s"
-
-              ffmpeg -y \
-                -i "$INPUT_FILE" \
-                -ss "$START_IN" \
-                -t "$PART_IN_DURATION" \
-                -filter:a "$AUDIO_FILTER" \
-                $CODEC \
-                $EXTRA_OPTS \
-                -f "$FORMAT" \
+              ffmpeg -y -i "$INPUT_FILE" -ss "$START_IN" -t "$PART_IN_DURATION" \
+                -filter:a "$AUDIO_FILTER" $CODEC $EXTRA_OPTS -f "$FORMAT" \
                 "$OUTPUT_FILE" 2>> ffmpeg-error.log || {
                   echo "❌ FFmpeg gagal di bagian $i"
                   cat ffmpeg-error.log
                   exit 1
                 }
 
-              PART_REAL_DUR=$(ffprobe -v error \
-                -show_entries format=duration \
-                -of default=noprint_wrappers=1:nokey=1 \
-                "$OUTPUT_FILE" 2>/dev/null || echo "unknown")
+              PART_REAL_DUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUTPUT_FILE" 2>/dev/null || echo "0")
               PART_SIZE=$(stat -c%s "$OUTPUT_FILE")
-
-              echo "✅ Bagian $((i+1))/${PARTS}: durasi=${PART_REAL_DUR}s, ukuran=${PART_SIZE} bytes → $OUTPUT_FILE"
+              echo "✅ Bagian $((i+1))/${PARTS}: durasi=${PART_REAL_DUR}s, ukuran=${PART_SIZE} bytes"
             done
-
           else
-            # ── SINGLE FILE — tanpa pemotongan ──────────────────────────
             PARTS=1
             OUTPUT_FILE="part_0_${{ inputs.job_id }}.${EXT}"
-
             echo "🔧 Memproses single file..."
 
-            ffmpeg -y \
-              -i "$INPUT_FILE" \
-              -filter:a "$AUDIO_FILTER" \
-              $CODEC \
-              $EXTRA_OPTS \
-              -f "$FORMAT" \
+            ffmpeg -y -i "$INPUT_FILE" -filter:a "$AUDIO_FILTER" $CODEC $EXTRA_OPTS -f "$FORMAT" \
               "$OUTPUT_FILE" 2>> ffmpeg-error.log || {
                 echo "❌ FFmpeg gagal"
                 cat ffmpeg-error.log
                 exit 1
               }
 
-            REAL_DUR=$(ffprobe -v error \
-              -show_entries format=duration \
-              -of default=noprint_wrappers=1:nokey=1 \
-              "$OUTPUT_FILE" 2>/dev/null || echo "unknown")
+            REAL_DUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUTPUT_FILE" 2>/dev/null || echo "0")
             FILE_SIZE=$(stat -c%s "$OUTPUT_FILE")
-
-            echo "✅ Single file: durasi=${REAL_DUR}s, ukuran=${FILE_SIZE} bytes → $OUTPUT_FILE"
-
-            echo "parts=1"                >> $GITHUB_OUTPUT
+            echo "✅ Single file: durasi=${REAL_DUR}s, ukuran=${FILE_SIZE} bytes"
+            echo "parts=1" >> $GITHUB_OUTPUT
             echo "part_duration=$REAL_DUR" >> $GITHUB_OUTPUT
           fi
 
@@ -486,7 +386,7 @@ jobs:
           cd ..
 
       # ===================================================================
-      # UPLOAD semua bagian ke webhook callback
+      # UPLOAD semua bagian ke webhook callback (BACKGROUND)
       # ===================================================================
       - name: Upload parts to webhook
         run: |
@@ -501,10 +401,10 @@ jobs:
 
           PARTS="${{ steps.process.outputs.parts }}"
           EXT="${{ steps.process.outputs.ext }}"
-
           echo "📤 Mengirim $PARTS bagian ke: ${{ inputs.callback_url }}"
 
           FAILED_PARTS=0
+          PIDS=()
 
           for (( i=0; i<PARTS; i++ )); do
             OUTPUT_FILE="part_${i}_${{ inputs.job_id }}.${EXT}"
@@ -515,66 +415,71 @@ jobs:
               continue
             fi
 
-            PART_DURATION=$(ffprobe -v error \
-              -show_entries format=duration \
-              -of default=noprint_wrappers=1:nokey=1 \
-              "$OUTPUT_FILE" 2>/dev/null || echo "0")
+            PART_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUTPUT_FILE" 2>/dev/null || echo "0")
             PART_SIZE=$(stat -c%s "$OUTPUT_FILE")
 
             echo "📤 Mengirim bagian $((i+1))/${PARTS}: $OUTPUT_FILE (${PART_DURATION}s, ${PART_SIZE} bytes)"
 
-            # Retry hingga 3x jika gagal
-            UPLOAD_SUCCESS=false
-            for attempt in 1 2 3; do
-              HTTP_RESP=$(curl -s -o /tmp/callback_response.json -w "%{http_code}" \
-                --max-time 120 \
-                -X POST "${{ inputs.callback_url }}" \
-                -F "job_id=${{ inputs.job_id }}" \
-                -F "audio_file=@${OUTPUT_FILE}" \
-                -F "title=${TITLE}" \
-                -F "source_type=${{ inputs.source_type }}" \
-                -F "duration=${PART_DURATION}" \
-                -F "part_index=${i}" \
-                -F "total_parts=${PARTS}" \
-                -F "file_size=${PART_SIZE}" \
-                -F "format=${EXT}" \
-                -F "settings_speed=${{ inputs.speed }}" \
-                -F "settings_amplify=${{ inputs.amplify }}" \
-                -F "settings_max_duration=${{ inputs.max_duration }}" \
-                -F "settings_auto_cut=${{ inputs.auto_cut }}")
+            # 🔥 UPLOAD DI BACKGROUND (&) - TIDAK BLOCKING
+            (
+              UPLOAD_SUCCESS=false
+              for attempt in 1 2 3; do
+                HTTP_RESP=$(curl -s -o /tmp/callback_response_${i}.json -w "%{http_code}" \
+                  --max-time 30 \
+                  --connect-timeout 10 \
+                  -X POST "${{ inputs.callback_url }}" \
+                  -F "job_id=${{ inputs.job_id }}" \
+                  -F "audio_file=@${OUTPUT_FILE}" \
+                  -F "title=${TITLE}" \
+                  -F "source_type=${{ inputs.source_type }}" \
+                  -F "duration=${PART_DURATION}" \
+                  -F "part_index=${i}" \
+                  -F "total_parts=${PARTS}" \
+                  -F "file_size=${PART_SIZE}" \
+                  -F "format=${EXT}" \
+                  -F "settings_speed=${{ inputs.speed }}" \
+                  -F "settings_amplify=${{ inputs.amplify }}" \
+                  -F "settings_max_duration=${{ inputs.max_duration }}" \
+                  -F "settings_auto_cut=${{ inputs.auto_cut }}")
 
-              echo "   Attempt $attempt — HTTP $HTTP_RESP"
+                echo "   Part $((i+1)) Attempt $attempt — HTTP $HTTP_RESP"
+                
+                if [[ "$HTTP_RESP" =~ ^2[0-9][0-9]$ ]]; then
+                  echo "✅ Part $((i+1)) berhasil (HTTP $HTTP_RESP)"
+                  UPLOAD_SUCCESS=true
+                  break
+                elif [ "$attempt" -lt 3 ]; then
+                  sleep 5
+                fi
+              done
               
-              if [ -f /tmp/callback_response.json ]; then
-                cat /tmp/callback_response.json || true
-                echo ""
+              if [ "$UPLOAD_SUCCESS" = false ]; then
+                echo "❌ Part $((i+1)) gagal setelah 3 percobaan" >> /tmp/failed_parts.log
               fi
-
-              if [[ "$HTTP_RESP" =~ ^2[0-9][0-9]$ ]]; then
-                echo "✅ Bagian $((i+1)) berhasil dikirim (HTTP $HTTP_RESP)"
-                UPLOAD_SUCCESS=true
-                break
-              elif [ "$attempt" -lt 3 ]; then
-                echo "⚠️  Retry dalam 5 detik..."
-                sleep 5
-              fi
-            done
+            ) &  # 🔥 BACKGROUND PROCESS - JANGAN TUNGGU
             
-            if [ "$UPLOAD_SUCCESS" = false ]; then
-              echo "❌ Bagian $((i+1)) gagal setelah 3 percobaan"
-              FAILED_PARTS=$((FAILED_PARTS + 1))
-            fi
+            PIDS+=($!)
+            
+            # Delay kecil antar background job
+            sleep 1
           done
 
-          if [ "$FAILED_PARTS" -gt 0 ]; then
-            echo "❌ $FAILED_PARTS dari $PARTS bagian gagal dikirim"
+          # 🔥 TUNGGU SEMUA BACKGROUND JOB SELESAI
+          echo "⏳ Menunggu semua upload selesai..."
+          for pid in "${PIDS[@]}"; do
+            wait $pid
+          done
+
+          # Cek hasil
+          if [ -f /tmp/failed_parts.log ]; then
+            FAILED_COUNT=$(wc -l < /tmp/failed_parts.log)
+            echo "❌ $FAILED_COUNT dari $PARTS bagian gagal dikirim"
             
-            # Kirim failure callback ke webhook
             curl -s -X POST "${{ inputs.callback_url }}" \
               -F "job_id=${{ inputs.job_id }}" \
-              -F "status=failed" \
-              -F "error_message=Gagal upload $FAILED_PARTS dari $PARTS bagian" \
-              -F "failed_parts=$FAILED_PARTS" \
+              -F "workflow_status=failed" \
+              -F "error_message=Gagal upload $FAILED_COUNT dari $PARTS bagian" \
+              -F "failed_parts=$FAILED_COUNT" \
               -F "total_parts=$PARTS" \
               || true
             
@@ -585,7 +490,7 @@ jobs:
           cd ..
 
       # ===================================================================
-      # Failure Callback - Kirim notifikasi jika workflow gagal
+      # Failure Callback
       # ===================================================================
       - name: Send failure callback
         if: failure()
@@ -594,23 +499,23 @@ jobs:
           
           ERROR_MSG="Workflow gagal pada step: ${{ github.job }}"
           
-          # Coba dapatkan error dari log
           if [ -f temp/ffmpeg-error.log ]; then
             ERROR_MSG=$(cat temp/ffmpeg-error.log | tail -5 | tr '\n' ' ')
           fi
           
           curl -s -X POST "${{ inputs.callback_url }}" \
+            --max-time 10 \
+            --connect-timeout 5 \
             -F "job_id=${{ inputs.job_id }}" \
-            -F "status=failed" \
-            -F "error_message=${ERROR_MSG}" \
             -F "workflow_status=failed" \
+            -F "error_message=${ERROR_MSG}" \
             -F "github_run_id=${{ github.run_id }}" \
             || true
           
           echo "📤 Failure callback terkirim"
 
       # ===================================================================
-      # Upload log jika ada error
+      # Upload error logs
       # ===================================================================
       - name: Upload error logs
         if: failure()
@@ -620,11 +525,12 @@ jobs:
           path: |
             temp/ffmpeg-error.log
             temp/info.json
-            /tmp/callback_response.json
+            /tmp/callback_response*.json
+            /tmp/failed_parts.log
 
       # ===================================================================
       # Cleanup
       # ===================================================================
       - name: Cleanup temp
         if: always()
-        run: rm -rf temp/
+        run: rm -rf temp/ /tmp/callback_response*.json /tmp/failed_parts.log
