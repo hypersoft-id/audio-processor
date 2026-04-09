@@ -56,7 +56,7 @@ on:
         type: string
       output_format:
         description: 'Format output (mp3/ogg/flac/wav)'
-        required:0
+        required: false  # 🔥 FIX: required:0 → required: false
         default: 'ogg'
         type: choice
         options:
@@ -230,7 +230,7 @@ jobs:
           cd ..
 
       # ===================================================================
-      # DOWNLOAD — Direct Upload (mp3 / ogg / wav / flac)
+      # DOWNLOAD — Direct Upload
       # ===================================================================
       - name: Download audio from direct URL
         if: inputs.source_type == 'mp3'
@@ -386,7 +386,7 @@ jobs:
           cd ..
 
       # ===================================================================
-      # UPLOAD semua bagian ke webhook callback (BACKGROUND)
+      # UPLOAD semua bagian ke webhook callback (SEQUENTIAL - STABIL)
       # ===================================================================
       - name: Upload parts to webhook
         run: |
@@ -404,7 +404,6 @@ jobs:
           echo "📤 Mengirim $PARTS bagian ke: ${{ inputs.callback_url }}"
 
           FAILED_PARTS=0
-          PIDS=()
 
           for (( i=0; i<PARTS; i++ )); do
             OUTPUT_FILE="part_${i}_${{ inputs.job_id }}.${EXT}"
@@ -420,66 +419,54 @@ jobs:
 
             echo "📤 Mengirim bagian $((i+1))/${PARTS}: $OUTPUT_FILE (${PART_DURATION}s, ${PART_SIZE} bytes)"
 
-            # 🔥 UPLOAD DI BACKGROUND (&) - TIDAK BLOCKING
-            (
-              UPLOAD_SUCCESS=false
-              for attempt in 1 2 3; do
-                HTTP_RESP=$(curl -s -o /tmp/callback_response_${i}.json -w "%{http_code}" \
-                  --max-time 30 \
-                  --connect-timeout 10 \
-                  -X POST "${{ inputs.callback_url }}" \
-                  -F "job_id=${{ inputs.job_id }}" \
-                  -F "audio_file=@${OUTPUT_FILE}" \
-                  -F "title=${TITLE}" \
-                  -F "source_type=${{ inputs.source_type }}" \
-                  -F "duration=${PART_DURATION}" \
-                  -F "part_index=${i}" \
-                  -F "total_parts=${PARTS}" \
-                  -F "file_size=${PART_SIZE}" \
-                  -F "format=${EXT}" \
-                  -F "settings_speed=${{ inputs.speed }}" \
-                  -F "settings_amplify=${{ inputs.amplify }}" \
-                  -F "settings_max_duration=${{ inputs.max_duration }}" \
-                  -F "settings_auto_cut=${{ inputs.auto_cut }}")
+            UPLOAD_SUCCESS=false
+            for attempt in 1 2 3; do
+              HTTP_RESP=$(curl -s -o /tmp/callback_response.json -w "%{http_code}" \
+                --max-time 60 \
+                --connect-timeout 10 \
+                -X POST "${{ inputs.callback_url }}" \
+                -F "job_id=${{ inputs.job_id }}" \
+                -F "audio_file=@${OUTPUT_FILE}" \
+                -F "title=${TITLE}" \
+                -F "source_type=${{ inputs.source_type }}" \
+                -F "duration=${PART_DURATION}" \
+                -F "part_index=${i}" \
+                -F "total_parts=${PARTS}" \
+                -F "file_size=${PART_SIZE}" \
+                -F "format=${EXT}" \
+                -F "settings_speed=${{ inputs.speed }}" \
+                -F "settings_amplify=${{ inputs.amplify }}" \
+                -F "settings_max_duration=${{ inputs.max_duration }}" \
+                -F "settings_auto_cut=${{ inputs.auto_cut }}")
 
-                echo "   Part $((i+1)) Attempt $attempt — HTTP $HTTP_RESP"
-                
-                if [[ "$HTTP_RESP" =~ ^2[0-9][0-9]$ ]]; then
-                  echo "✅ Part $((i+1)) berhasil (HTTP $HTTP_RESP)"
-                  UPLOAD_SUCCESS=true
-                  break
-                elif [ "$attempt" -lt 3 ]; then
-                  sleep 5
-                fi
-              done
+              echo "   Part $((i+1)) Attempt $attempt — HTTP $HTTP_RESP"
               
-              if [ "$UPLOAD_SUCCESS" = false ]; then
-                echo "❌ Part $((i+1)) gagal setelah 3 percobaan" >> /tmp/failed_parts.log
+              if [[ "$HTTP_RESP" =~ ^2[0-9][0-9]$ ]]; then
+                echo "✅ Part $((i+1)) berhasil (HTTP $HTTP_RESP)"
+                UPLOAD_SUCCESS=true
+                break
+              elif [ "$attempt" -lt 3 ]; then
+                echo "⚠️ Retry dalam 5 detik..."
+                sleep 5
               fi
-            ) &  # 🔥 BACKGROUND PROCESS - JANGAN TUNGGU
+            done
             
-            PIDS+=($!)
-            
-            # Delay kecil antar background job
-            sleep 1
+            if [ "$UPLOAD_SUCCESS" = false ]; then
+              echo "❌ Part $((i+1)) gagal setelah 3 percobaan"
+              FAILED_PARTS=$((FAILED_PARTS + 1))
+            fi
           done
 
-          # 🔥 TUNGGU SEMUA BACKGROUND JOB SELESAI
-          echo "⏳ Menunggu semua upload selesai..."
-          for pid in "${PIDS[@]}"; do
-            wait $pid
-          done
-
-          # Cek hasil
-          if [ -f /tmp/failed_parts.log ]; then
-            FAILED_COUNT=$(wc -l < /tmp/failed_parts.log)
-            echo "❌ $FAILED_COUNT dari $PARTS bagian gagal dikirim"
+          if [ "$FAILED_PARTS" -gt 0 ]; then
+            echo "❌ $FAILED_PARTS dari $PARTS bagian gagal dikirim"
             
             curl -s -X POST "${{ inputs.callback_url }}" \
+              --max-time 10 \
+              --connect-timeout 5 \
               -F "job_id=${{ inputs.job_id }}" \
               -F "workflow_status=failed" \
-              -F "error_message=Gagal upload $FAILED_COUNT dari $PARTS bagian" \
-              -F "failed_parts=$FAILED_COUNT" \
+              -F "error_message=Gagal upload $FAILED_PARTS dari $PARTS bagian" \
+              -F "failed_parts=$FAILED_PARTS" \
               -F "total_parts=$PARTS" \
               || true
             
@@ -525,12 +512,11 @@ jobs:
           path: |
             temp/ffmpeg-error.log
             temp/info.json
-            /tmp/callback_response*.json
-            /tmp/failed_parts.log
+            /tmp/callback_response.json
 
       # ===================================================================
       # Cleanup
       # ===================================================================
       - name: Cleanup temp
         if: always()
-        run: rm -rf temp/ /tmp/callback_response*.json /tmp/failed_parts.log
+        run: rm -rf temp/ /tmp/callback_response.json
