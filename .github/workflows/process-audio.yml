@@ -67,7 +67,6 @@ on:
       auto_cut:
         description: 'Potong otomatis jika durasi melebihi max_duration (true/false)'
         required: false
-        # Default true agar konsisten dengan default PHP backend
         default: 'true'
         type: string
       job_id:
@@ -101,7 +100,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install yt-dlp
-          sudo apt-get install -y bc
+          sudo apt-get install -y bc jq
 
       - name: Create temp directory
         run: mkdir -p temp
@@ -236,6 +235,7 @@ jobs:
 
           HTTP_STATUS=$(curl -L \
             --retry 3 \
+            --max-time 300 \
             -w "%{http_code}" \
             -o "$INPUT_FILE" \
             "${{ inputs.mp3_file_url }}")
@@ -306,16 +306,41 @@ jobs:
           echo "⏱ Durasi : ${TOTAL_DURATION}s"
 
           # ── Codec output sesuai format ──────────────────────────────────
-        OUTPUT_FORMAT="${{ inputs.output_format }}"
-        case "$OUTPUT_FORMAT" in
-          mp3)  CODEC="-c:a libmp3lame -q:a 2" ; EXT="mp3"  ; FORMAT="mp3"  ;;
-          flac) CODEC="-c:a flac"               ; EXT="flac" ; FORMAT="flac" ;;
-          wav)  CODEC="-c:a pcm_s16le"          ; EXT="wav"  ; FORMAT="wav"  ;;
-          ogg)  CODEC="-c:a libvorbis -b:a 128k"; EXT="ogg"  ; FORMAT="ogg"  ;;
-          *)    CODEC="-c:a libvorbis -b:a 128k"; EXT="ogg"  ; FORMAT="ogg"  ;;
-        esac
-        
-        echo "🎚 Output format: $OUTPUT_FORMAT, container: $FORMAT, extension: .$EXT"
+          OUTPUT_FORMAT="${{ inputs.output_format }}"
+          case "$OUTPUT_FORMAT" in
+            mp3)
+              CODEC="-c:a libmp3lame -q:a 2"
+              EXT="mp3"
+              FORMAT="mp3"
+              EXTRA_OPTS=""
+              ;;
+            flac)
+              CODEC="-c:a flac"
+              EXT="flac"
+              FORMAT="flac"
+              EXTRA_OPTS=""
+              ;;
+            wav)
+              CODEC="-c:a pcm_s16le"
+              EXT="wav"
+              FORMAT="wav"
+              EXTRA_OPTS=""
+              ;;
+            ogg)
+              CODEC="-c:a libvorbis -b:a 128k"
+              EXT="ogg"
+              FORMAT="ogg"
+              EXTRA_OPTS="-ar 44100 -ac 2"
+              ;;
+            *)
+              CODEC="-c:a libvorbis -b:a 128k"
+              EXT="ogg"
+              FORMAT="ogg"
+              EXTRA_OPTS="-ar 44100 -ac 2"
+              ;;
+          esac
+          
+          echo "🎚 Output format: $OUTPUT_FORMAT, container: $FORMAT, extension: .$EXT"
 
           # ── Speed filter — tangani atempo > 2.0 dengan chaining ─────────
           SPEED="${{ inputs.speed }}"
@@ -382,9 +407,11 @@ jobs:
               ffmpeg -y \
                 -i "$INPUT_FILE" \
                 -ss "$START_IN" \
-                -t  "$PART_IN_DURATION" \
+                -t "$PART_IN_DURATION" \
                 -filter:a "$AUDIO_FILTER" \
                 $CODEC \
+                $EXTRA_OPTS \
+                -f "$FORMAT" \
                 "$OUTPUT_FILE" 2>> ffmpeg-error.log || {
                   echo "❌ FFmpeg gagal di bagian $i"
                   cat ffmpeg-error.log
@@ -411,6 +438,8 @@ jobs:
               -i "$INPUT_FILE" \
               -filter:a "$AUDIO_FILTER" \
               $CODEC \
+              $EXTRA_OPTS \
+              -f "$FORMAT" \
               "$OUTPUT_FILE" 2>> ffmpeg-error.log || {
                 echo "❌ FFmpeg gagal"
                 cat ffmpeg-error.log
@@ -425,7 +454,7 @@ jobs:
 
             echo "✅ Single file: durasi=${REAL_DUR}s, ukuran=${FILE_SIZE} bytes → $OUTPUT_FILE"
 
-            echo "parts=1"               >> $GITHUB_OUTPUT
+            echo "parts=1"                >> $GITHUB_OUTPUT
             echo "part_duration=$REAL_DUR" >> $GITHUB_OUTPUT
           fi
 
@@ -471,6 +500,7 @@ jobs:
             echo "📤 Mengirim bagian $((i+1))/${PARTS}: $OUTPUT_FILE (${PART_DURATION}s, ${PART_SIZE} bytes)"
 
             # Retry hingga 3x jika gagal
+            UPLOAD_SUCCESS=false
             for attempt in 1 2 3; do
               HTTP_RESP=$(curl -s -o /tmp/callback_response.json -w "%{http_code}" \
                 --max-time 120 \
@@ -490,27 +520,34 @@ jobs:
                 -F "settings_auto_cut=${{ inputs.auto_cut }}")
 
               echo "   Attempt $attempt — HTTP $HTTP_RESP"
-              cat /tmp/callback_response.json || true
-              echo ""
+              
+              if [ -f /tmp/callback_response.json ]; then
+                cat /tmp/callback_response.json || true
+                echo ""
+              fi
 
-              if [[ "$HTTP_RESP" =~ ^2 ]]; then
+              if [[ "$HTTP_RESP" =~ ^2[0-9][0-9]$ ]]; then
                 echo "✅ Bagian $((i+1)) berhasil dikirim (HTTP $HTTP_RESP)"
+                UPLOAD_SUCCESS=true
                 break
               elif [ "$attempt" -lt 3 ]; then
                 echo "⚠️  Retry dalam 5 detik..."
                 sleep 5
-              else
-                echo "⚠️  Bagian $((i+1)) gagal setelah $attempt percobaan (HTTP $HTTP_RESP)"
-                FAILED_PARTS=$((FAILED_PARTS + 1))
               fi
             done
+            
+            if [ "$UPLOAD_SUCCESS" = false ]; then
+              echo "❌ Bagian $((i+1)) gagal setelah 3 percobaan"
+              FAILED_PARTS=$((FAILED_PARTS + 1))
+            fi
           done
 
           if [ "$FAILED_PARTS" -gt 0 ]; then
-            echo "⚠️  $FAILED_PARTS dari $PARTS bagian gagal dikirim"
+            echo "❌ $FAILED_PARTS dari $PARTS bagian gagal dikirim"
             exit 1
           fi
-
+          
+          echo "✅ Semua $PARTS bagian berhasil dikirim"
           cd ..
 
       # ===================================================================
@@ -531,4 +568,4 @@ jobs:
       # ===================================================================
       - name: Cleanup temp
         if: always()
-        run: rm -rf temp/   
+        run: rm -rf temp/
