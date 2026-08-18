@@ -291,7 +291,7 @@ jobs:
           cd ..
 
       # ===================================================================
-      # PROCESS AUDIO — Time Stretch (atempo) + Loudnorm + WAV intermediate
+      # PROCESS AUDIO — Change Speed (setpts) + Loudnorm + WAV intermediate
       # ===================================================================
       - name: Process Audio with FFmpeg
         id: process
@@ -350,7 +350,7 @@ jobs:
           TOTAL_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$MASTER_WAV")
           echo "⏱ Durasi setelah decode: ${TOTAL_DURATION}s"
 
-          # ── Step 2: Hitung speed factor (time stretch, BUKAN change speed) ──
+          # ── Step 2: Hitung speed factor (Change Speed, BUKAN time stretch) ──
           if [ "$AUTO_SPEED" == "true" ]; then
             if (( $(echo "$TOTAL_DURATION > $MAX_DURATION" | bc -l) )); then
               SPEED=$(echo "scale=6; $TOTAL_DURATION / $MAX_DURATION" | bc -l)
@@ -364,68 +364,34 @@ jobs:
             echo "⚡ Speed manual: ${SPEED}x"
           fi
 
-          # Skip time stretch jika speed ~1.0
-          NEED_TEMPO=0
-          if (( $(echo "$SPEED > 1.01" | bc -l) )) || (( $(echo "$SPEED < 0.99" | bc -l) )); then
-            NEED_TEMPO=1
-          fi
+          # Hitung rasio untuk change speed (1/speed)
+          SPEED_RATIO=$(echo "scale=10; 1 / $SPEED" | bc -l)
+          echo "🎛 Speed=${SPEED}x, Ratio=${SPEED_RATIO}"
 
-          build_atempo() {
-            local spd="$1"
-            local filters=""
-            while (( $(echo "$spd > 2.0" | bc -l) )); do
-              filters="${filters}atempo=2.0,"
-              spd=$(echo "scale=6; $spd / 2.0" | bc -l)
-            done
-            while (( $(echo "$spd < 0.5" | bc -l) )); do
-              filters="${filters}atempo=0.5,"
-              spd=$(echo "scale=6; $spd / 0.5" | bc -l)
-            done
-            spd=$(printf "%.6f" "$spd")
-            filters="${filters}atempo=${spd}"
-            echo "$filters"
-          }
+          # ── Step 3: Bangun filter chain (Change Speed) ──
+          FILTER_CHAIN="setpts=${SPEED_RATIO}*PTS, aresample=48000:resampler=soxr:precision=28"
 
-          # ── Step 3: Bangun filter chain ──
-          FILTER_CHAIN=""
+          echo "🎛 Speed=${SPEED}x, Ratio=${SPEED_RATIO}"
 
-          if [ "$NEED_TEMPO" -eq 1 ]; then
-            TEMPO_FILTER=$(build_atempo "$SPEED")
-            FILTER_CHAIN="${TEMPO_FILTER}"
-          fi
-
-          echo "🎛 Speed=${SPEED}x NEED_TEMPO=${NEED_TEMPO}"
-
+          # ── Step 4: Tambahkan loudnorm jika diperlukan ──
           if [ "$USE_LOUDNORM" == "true" ]; then
             TP=$(echo "$NORMALIZE_DB" | tr -d '-')
             LOUDNORM="loudnorm=I=-16:LRA=11:TP=-${TP}:linear=true"
-            if [ -n "$FILTER_CHAIN" ]; then
-              FILTER_CHAIN="${FILTER_CHAIN},${LOUDNORM}"
-            else
-              FILTER_CHAIN="${LOUDNORM}"
-            fi
+            FILTER_CHAIN="${FILTER_CHAIN},${LOUDNORM}"
           fi
 
           # Gain tambahan + kompresor ringan untuk stabilitas
           if [ "$AMPLIFY" != "0" ] && [ -n "$AMPLIFY" ]; then
             VOLUME=$(echo "scale=6; e(l(10)*${AMPLIFY}/20)" | bc -l)
-            if [ -n "$FILTER_CHAIN" ]; then
-              FILTER_CHAIN="${FILTER_CHAIN},volume=${VOLUME}"
-            else
-              FILTER_CHAIN="volume=${VOLUME}"
-            fi
+            FILTER_CHAIN="${FILTER_CHAIN},volume=${VOLUME}"
           fi
 
-          if [ -n "$FILTER_CHAIN" ]; then
-            FILTER_CHAIN="${FILTER_CHAIN},acompressor=threshold=-18dB:ratio=3:attack=5:release=50"
-          else
-            FILTER_CHAIN="acompressor=threshold=-18dB:ratio=3:attack=5:release=50"
-          fi
+          FILTER_CHAIN="${FILTER_CHAIN},acompressor=threshold=-18dB:ratio=3:attack=5:release=50"
 
           echo "🔗 Filter chain: ${FILTER_CHAIN}"
 
           ADJUSTED_DURATION=$(echo "scale=3; $TOTAL_DURATION / $SPEED" | bc -l)
-          echo "📏 Durasi setelah time stretch: ${ADJUSTED_DURATION}s"
+          echo "📏 Durasi setelah change speed: ${ADJUSTED_DURATION}s"
           echo "applied_speed=$SPEED" >> $GITHUB_OUTPUT
 
           process_part() {
