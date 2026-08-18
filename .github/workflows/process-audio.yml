@@ -538,7 +538,8 @@ jobs:
             echo "📤 Mengirim bagian $((i+1))/${PARTS}: $OUTPUT_FILE (${PART_DURATION}s, ${PART_SIZE} bytes)"
 
             HTTP_RESP=$(curl -s -o /tmp/callback_response.json -w "%{http_code}" \
-              --max-time 120 \
+              --max-time 300 \
+              --connect-timeout 30 \
               -X POST "${{ inputs.callback_url }}" \
               -F "job_id=${{ inputs.job_id }}" \
               -F "audio_file=@${OUTPUT_FILE}" \
