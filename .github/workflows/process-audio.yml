@@ -365,7 +365,10 @@ jobs:
           fi
 
           # Skip time stretch jika speed ~1.0
-          NEED_TEMPO=$(echo "$SPEED > 1.01 || $SPEED < 0.99" | bc -l)
+          NEED_TEMPO=0
+          if (( $(echo "$SPEED > 1.01" | bc -l) )) || (( $(echo "$SPEED < 0.99" | bc -l) )); then
+            NEED_TEMPO=1
+          fi
 
           build_atempo() {
             local spd="$1"
@@ -386,10 +389,12 @@ jobs:
           # ── Step 3: Bangun filter chain ──
           FILTER_CHAIN=""
 
-          if [ "$NEED_TEMPO" == "1" ]; then
+          if [ "$NEED_TEMPO" -eq 1 ]; then
             TEMPO_FILTER=$(build_atempo "$SPEED")
             FILTER_CHAIN="${TEMPO_FILTER}"
           fi
+
+          echo "🎛 Speed=${SPEED}x NEED_TEMPO=${NEED_TEMPO}"
 
           if [ "$USE_LOUDNORM" == "true" ]; then
             TP=$(echo "$NORMALIZE_DB" | tr -d '-')
@@ -417,21 +422,26 @@ jobs:
             FILTER_CHAIN="acompressor=threshold=-18dB:ratio=3:attack=5:release=50"
           fi
 
+          echo "🔗 Filter chain: ${FILTER_CHAIN}"
+
           ADJUSTED_DURATION=$(echo "scale=3; $TOTAL_DURATION / $SPEED" | bc -l)
           echo "📏 Durasi setelah time stretch: ${ADJUSTED_DURATION}s"
           echo "applied_speed=$SPEED" >> $GITHUB_OUTPUT
 
           process_part() {
             local start_in="$1"
-            local duration_in="$2"
+            local target_out_duration="$2"
             local part_idx="$3"
             local output_file="part_${part_idx}_${{ inputs.job_id }}.${EXT}"
+            local duration_in
+            duration_in=$(echo "scale=6; $target_out_duration * $SPEED" | bc -l)
 
-            echo "🔧 Memproses bagian $((part_idx+1)): start=${start_in}s dur=${duration_in}s"
+            echo "🔧 Memproses bagian $((part_idx+1)): start=${start_in}s in=${duration_in}s → target_out=${target_out_duration}s"
 
-            ffmpeg -y -i "$MASTER_WAV" -ss "$start_in" -t "$duration_in" \
+            ffmpeg -y -ss "$start_in" -i "$MASTER_WAV" -t "$duration_in" \
               -filter:a "$FILTER_CHAIN" \
               $OUT_CODEC -ar $SAMPLE_RATE -ac 2 -f "$FORMAT" \
+              -t "$target_out_duration" \
               -loglevel error \
               "$output_file" 2>> ffmpeg-error.log || return 1
 
@@ -439,9 +449,9 @@ jobs:
             part_dur=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$output_file" 2>/dev/null || echo "0")
             part_size=$(stat -c%s "$output_file")
 
-            # Validasi durasi <= max_duration
-            if (( $(echo "$part_dur > $MAX_DURATION + 1" | bc -l) )); then
-              echo "❌ Bagian $part_idx melebihi max_duration: ${part_dur}s > ${MAX_DURATION}s"
+            # Validasi durasi output (bukan input) <= max_duration
+            if (( $(echo "$part_dur > $MAX_DURATION + 5" | bc -l) )); then
+              echo "❌ Bagian $part_idx output melebihi max_duration: ${part_dur}s > ${MAX_DURATION}s (input=${duration_in}s)"
               return 1
             fi
 
@@ -452,16 +462,21 @@ jobs:
           if [ "$AUTO_CUT" == "true" ] && (( $(echo "$ADJUSTED_DURATION > $MAX_DURATION" | bc -l) )); then
             PARTS=$(echo "scale=0; ($ADJUSTED_DURATION + $MAX_DURATION - 1) / $MAX_DURATION" | bc)
             PARTS=$(printf '%d' "$PARTS")
-            PART_OUT_DURATION=$(echo "scale=3; $ADJUSTED_DURATION / $PARTS" | bc -l)
-            PART_IN_DURATION=$(echo "scale=3; $PART_OUT_DURATION * $SPEED" | bc -l)
+            PART_OUT_DURATION=$(echo "scale=6; $ADJUSTED_DURATION / $PARTS" | bc -l)
 
             echo "✂️ Auto cut: ${PARTS} bagian × ~${PART_OUT_DURATION}s output"
             echo "parts=$PARTS" >> $GITHUB_OUTPUT
             echo "part_duration=$PART_OUT_DURATION" >> $GITHUB_OUTPUT
 
             for (( i=0; i<PARTS; i++ )); do
-              START_IN=$(echo "scale=3; $i * $PART_IN_DURATION" | bc -l)
-              process_part "$START_IN" "$PART_IN_DURATION" "$i" || {
+              START_OUT=$(echo "scale=6; $i * $PART_OUT_DURATION" | bc -l)
+              REMAINING_OUT=$(echo "scale=6; $ADJUSTED_DURATION - $START_OUT" | bc -l)
+              THIS_OUT_DURATION="$PART_OUT_DURATION"
+              if (( $(echo "$REMAINING_OUT < $PART_OUT_DURATION" | bc -l) )); then
+                THIS_OUT_DURATION="$REMAINING_OUT"
+              fi
+              START_IN=$(echo "scale=6; $i * $PART_OUT_DURATION * $SPEED" | bc -l)
+              process_part "$START_IN" "$THIS_OUT_DURATION" "$i" || {
                 echo "❌ FFmpeg gagal di bagian $i"
                 cat ffmpeg-error.log
                 exit 1
