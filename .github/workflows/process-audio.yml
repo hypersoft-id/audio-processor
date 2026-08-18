@@ -50,9 +50,9 @@ on:
         default: '0'
         type: string
       max_duration:
-        description: 'Durasi maksimum per bagian (detik) — default 420 (batas Roblox)'
+        description: 'Durasi maksimum per bagian (detik) — default 400 (batas Roblox)'
         required: false
-        default: '420'
+        default: '400'
         type: string
       auto_speed:
         description: 'Hitung speed otomatis: durasi/max_duration jika durasi > max (true/false)'
