@@ -40,19 +40,34 @@ on:
         required: false
         type: string
       speed:
-        description: 'Kecepatan putar (0.5–5.0)'
+        description: 'Kecepatan tempo manual (0.5–5.0) — dipakai jika auto_speed=false'
         required: false
         default: '2.3'
         type: string
       amplify:
-        description: 'Amplifikasi volume dalam dB (-20 sampai 20)'
+        description: 'Gain tambahan dalam dB setelah loudnorm (-20 sampai 20)'
         required: false
-        default: '-4'
+        default: '0'
         type: string
       max_duration:
-        description: 'Durasi maksimum per bagian (detik) — dipakai saat auto_cut=true'
+        description: 'Durasi maksimum per bagian (detik) — default 420 (batas Roblox)'
         required: false
-        default: '360'
+        default: '420'
+        type: string
+      auto_speed:
+        description: 'Hitung speed otomatis: durasi/max_duration jika durasi > max (true/false)'
+        required: false
+        default: 'true'
+        type: string
+      normalize_db:
+        description: 'Target true peak loudnorm dalam dB (mis. -1 atau -2)'
+        required: false
+        default: '-1'
+        type: string
+      use_loudnorm:
+        description: 'Gunakan loudnorm untuk normalisasi dinamis (true/false)'
+        required: false
+        default: 'true'
         type: string
       output_format:
         description: 'Format output (mp3/ogg/flac/wav)'
@@ -276,7 +291,7 @@ jobs:
           cd ..
 
       # ===================================================================
-      # PROCESS AUDIO dengan FFmpeg
+      # PROCESS AUDIO — Time Stretch (atempo) + Loudnorm + WAV intermediate
       # ===================================================================
       - name: Process Audio with FFmpeg
         id: process
@@ -292,7 +307,7 @@ jobs:
 
           echo "📂 Input  : $INPUT_FILE"
           echo "🎵 Title  : $TITLE"
-          echo "⏱ Durasi : ${TOTAL_DURATION}s"
+          echo "⏱ Durasi asli: ${TOTAL_DURATION}s"
 
           if [ ! -f "$INPUT_FILE" ]; then
             echo "❌ Input file tidak ditemukan: $INPUT_FILE"
@@ -300,16 +315,58 @@ jobs:
           fi
 
           OUTPUT_FORMAT="${{ inputs.output_format }}"
-          case "$OUTPUT_FORMAT" in
-            mp3)  CODEC="-c:a libmp3lame -q:a 2" ; EXT="mp3"  ; FORMAT="mp3"  ; EXTRA_OPTS="" ;;
-            flac) CODEC="-c:a flac"               ; EXT="flac" ; FORMAT="flac" ; EXTRA_OPTS="" ;;
-            wav)  CODEC="-c:a pcm_s16le"          ; EXT="wav"  ; FORMAT="wav"  ; EXTRA_OPTS="" ;;
-            ogg|*) CODEC="-c:a libvorbis -b:a 128k"; EXT="ogg"  ; FORMAT="ogg"  ; EXTRA_OPTS="-ar 44100 -ac 2" ;;
-          esac
-          
-          echo "🎚 Output format: $OUTPUT_FORMAT, extension: .$EXT"
+          MAX_DURATION="${{ inputs.max_duration }}"
+          AUTO_CUT="${{ inputs.auto_cut }}"
+          AUTO_SPEED="${{ inputs.auto_speed }}"
+          MANUAL_SPEED="${{ inputs.speed }}"
+          AMPLIFY="${{ inputs.amplify }}"
+          NORMALIZE_DB="${{ inputs.normalize_db }}"
+          USE_LOUDNORM="${{ inputs.use_loudnorm }}"
+          SAMPLE_RATE=48000
 
-          SPEED="${{ inputs.speed }}"
+          case "$OUTPUT_FORMAT" in
+            mp3)  OUT_CODEC="-c:a libmp3lame -b:a 320k" ; EXT="mp3"  ; FORMAT="mp3"  ;;
+            flac) OUT_CODEC="-c:a flac"                  ; EXT="flac" ; FORMAT="flac" ;;
+            wav)  OUT_CODEC="-c:a pcm_s16le"             ; EXT="wav"  ; FORMAT="wav"  ;;
+            ogg|*) OUT_CODEC="-c:a libvorbis -q:a 10"    ; EXT="ogg"  ; FORMAT="ogg"  ;;
+          esac
+
+          echo "🎚 Output: $OUTPUT_FORMAT @ ${SAMPLE_RATE}Hz stereo"
+
+          # ── Step 1: Decode ke WAV lossless (resample berkualitas tinggi) ──
+          MASTER_WAV="master_${{ inputs.job_id }}.wav"
+          ffmpeg -y -i "$INPUT_FILE" \
+            -ar $SAMPLE_RATE -ac 2 \
+            -c:a pcm_s16le \
+            -af "aresample=resampler=soxr:precision=28:cheby=1" \
+            -loglevel error \
+            "$MASTER_WAV" 2>> ffmpeg-error.log || {
+              echo "❌ Gagal decode ke WAV"
+              cat ffmpeg-error.log
+              exit 1
+            }
+
+          # Ambil durasi aktual dari WAV
+          TOTAL_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$MASTER_WAV")
+          echo "⏱ Durasi setelah decode: ${TOTAL_DURATION}s"
+
+          # ── Step 2: Hitung speed factor (time stretch, BUKAN change speed) ──
+          if [ "$AUTO_SPEED" == "true" ]; then
+            if (( $(echo "$TOTAL_DURATION > $MAX_DURATION" | bc -l) )); then
+              SPEED=$(echo "scale=6; $TOTAL_DURATION / $MAX_DURATION" | bc -l)
+              echo "⚡ Auto speed: ${SPEED}x (fit ke ${MAX_DURATION}s)"
+            else
+              SPEED="$MANUAL_SPEED"
+              echo "⚡ Durasi <= ${MAX_DURATION}s, pakai speed manual: ${SPEED}x"
+            fi
+          else
+            SPEED="$MANUAL_SPEED"
+            echo "⚡ Speed manual: ${SPEED}x"
+          fi
+
+          # Skip time stretch jika speed ~1.0
+          NEED_TEMPO=$(echo "$SPEED > 1.01 || $SPEED < 0.99" | bc -l)
+
           build_atempo() {
             local spd="$1"
             local filters=""
@@ -326,15 +383,71 @@ jobs:
             echo "$filters"
           }
 
-          SPEED_FILTER=$(build_atempo "$SPEED")
-          AMPLIFY="${{ inputs.amplify }}"
-          VOLUME=$(echo "scale=6; e(l(10)*${AMPLIFY}/20)" | bc -l)
-          AUDIO_FILTER="${SPEED_FILTER},volume=${VOLUME}"
+          # ── Step 3: Bangun filter chain ──
+          FILTER_CHAIN=""
+
+          if [ "$NEED_TEMPO" == "1" ]; then
+            TEMPO_FILTER=$(build_atempo "$SPEED")
+            FILTER_CHAIN="${TEMPO_FILTER}"
+          fi
+
+          if [ "$USE_LOUDNORM" == "true" ]; then
+            TP=$(echo "$NORMALIZE_DB" | tr -d '-')
+            LOUDNORM="loudnorm=I=-16:LRA=11:TP=-${TP}:linear=true"
+            if [ -n "$FILTER_CHAIN" ]; then
+              FILTER_CHAIN="${FILTER_CHAIN},${LOUDNORM}"
+            else
+              FILTER_CHAIN="${LOUDNORM}"
+            fi
+          fi
+
+          # Gain tambahan + kompresor ringan untuk stabilitas
+          if [ "$AMPLIFY" != "0" ] && [ -n "$AMPLIFY" ]; then
+            VOLUME=$(echo "scale=6; e(l(10)*${AMPLIFY}/20)" | bc -l)
+            if [ -n "$FILTER_CHAIN" ]; then
+              FILTER_CHAIN="${FILTER_CHAIN},volume=${VOLUME}"
+            else
+              FILTER_CHAIN="volume=${VOLUME}"
+            fi
+          fi
+
+          if [ -n "$FILTER_CHAIN" ]; then
+            FILTER_CHAIN="${FILTER_CHAIN},acompressor=threshold=-18dB:ratio=3:attack=5:release=50"
+          else
+            FILTER_CHAIN="acompressor=threshold=-18dB:ratio=3:attack=5:release=50"
+          fi
+
           ADJUSTED_DURATION=$(echo "scale=3; $TOTAL_DURATION / $SPEED" | bc -l)
-          
-          echo "📏 Durasi setelah speed: ${ADJUSTED_DURATION}s"
-          MAX_DURATION="${{ inputs.max_duration }}"
-          AUTO_CUT="${{ inputs.auto_cut }}"
+          echo "📏 Durasi setelah time stretch: ${ADJUSTED_DURATION}s"
+          echo "applied_speed=$SPEED" >> $GITHUB_OUTPUT
+
+          process_part() {
+            local start_in="$1"
+            local duration_in="$2"
+            local part_idx="$3"
+            local output_file="part_${part_idx}_${{ inputs.job_id }}.${EXT}"
+
+            echo "🔧 Memproses bagian $((part_idx+1)): start=${start_in}s dur=${duration_in}s"
+
+            ffmpeg -y -i "$MASTER_WAV" -ss "$start_in" -t "$duration_in" \
+              -filter:a "$FILTER_CHAIN" \
+              $OUT_CODEC -ar $SAMPLE_RATE -ac 2 -f "$FORMAT" \
+              -loglevel error \
+              "$output_file" 2>> ffmpeg-error.log || return 1
+
+            local part_dur part_size
+            part_dur=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$output_file" 2>/dev/null || echo "0")
+            part_size=$(stat -c%s "$output_file")
+
+            # Validasi durasi <= max_duration
+            if (( $(echo "$part_dur > $MAX_DURATION + 1" | bc -l) )); then
+              echo "❌ Bagian $part_idx melebihi max_duration: ${part_dur}s > ${MAX_DURATION}s"
+              return 1
+            fi
+
+            echo "✅ Bagian $((part_idx+1)): durasi=${part_dur}s, ukuran=${part_size} bytes"
+            return 0
+          }
 
           if [ "$AUTO_CUT" == "true" ] && (( $(echo "$ADJUSTED_DURATION > $MAX_DURATION" | bc -l) )); then
             PARTS=$(echo "scale=0; ($ADJUSTED_DURATION + $MAX_DURATION - 1) / $MAX_DURATION" | bc)
@@ -342,34 +455,24 @@ jobs:
             PART_OUT_DURATION=$(echo "scale=3; $ADJUSTED_DURATION / $PARTS" | bc -l)
             PART_IN_DURATION=$(echo "scale=3; $PART_OUT_DURATION * $SPEED" | bc -l)
 
-            echo "✂️ Auto cut: ${PARTS} bagian × ${PART_OUT_DURATION}s"
+            echo "✂️ Auto cut: ${PARTS} bagian × ~${PART_OUT_DURATION}s output"
             echo "parts=$PARTS" >> $GITHUB_OUTPUT
             echo "part_duration=$PART_OUT_DURATION" >> $GITHUB_OUTPUT
 
             for (( i=0; i<PARTS; i++ )); do
               START_IN=$(echo "scale=3; $i * $PART_IN_DURATION" | bc -l)
-              OUTPUT_FILE="part_${i}_${{ inputs.job_id }}.${EXT}"
-              echo "🔧 Memproses bagian $((i+1))/${PARTS}"
-
-              ffmpeg -y -i "$INPUT_FILE" -ss "$START_IN" -t "$PART_IN_DURATION" \
-                -filter:a "$AUDIO_FILTER" $CODEC $EXTRA_OPTS -f "$FORMAT" \
-                -loglevel error \
-                "$OUTPUT_FILE" 2>> ffmpeg-error.log || {
-                  echo "❌ FFmpeg gagal di bagian $i"
-                  cat ffmpeg-error.log
-                  exit 1
-                }
-
-              PART_REAL_DUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUTPUT_FILE" 2>/dev/null || echo "0")
-              PART_SIZE=$(stat -c%s "$OUTPUT_FILE")
-              echo "✅ Bagian $((i+1))/${PARTS}: durasi=${PART_REAL_DUR}s, ukuran=${PART_SIZE} bytes"
+              process_part "$START_IN" "$PART_IN_DURATION" "$i" || {
+                echo "❌ FFmpeg gagal di bagian $i"
+                cat ffmpeg-error.log
+                exit 1
+              }
             done
           else
-            PARTS=1
             OUTPUT_FILE="part_0_${{ inputs.job_id }}.${EXT}"
             echo "🔧 Memproses single file..."
 
-            ffmpeg -y -i "$INPUT_FILE" -filter:a "$AUDIO_FILTER" $CODEC $EXTRA_OPTS -f "$FORMAT" \
+            ffmpeg -y -i "$MASTER_WAV" -filter:a "$FILTER_CHAIN" \
+              $OUT_CODEC -ar $SAMPLE_RATE -ac 2 -f "$FORMAT" \
               -loglevel error \
               "$OUTPUT_FILE" 2>> ffmpeg-error.log || {
                 echo "❌ FFmpeg gagal"
@@ -385,6 +488,7 @@ jobs:
           fi
 
           echo "ext=$EXT" >> $GITHUB_OUTPUT
+          rm -f "$MASTER_WAV"
           cd ..
 
       # ===================================================================
@@ -430,10 +534,12 @@ jobs:
               -F "total_parts=${PARTS}" \
               -F "file_size=${PART_SIZE}" \
               -F "format=${EXT}" \
-              -F "settings_speed=${{ inputs.speed }}" \
+              -F "settings_speed=${{ steps.process.outputs.applied_speed }}" \
               -F "settings_amplify=${{ inputs.amplify }}" \
               -F "settings_max_duration=${{ inputs.max_duration }}" \
-              -F "settings_auto_cut=${{ inputs.auto_cut }}")
+              -F "settings_auto_cut=${{ inputs.auto_cut }}" \
+              -F "settings_auto_speed=${{ inputs.auto_speed }}" \
+              -F "settings_normalize_db=${{ inputs.normalize_db }}")
 
             echo "   HTTP $HTTP_RESP"
             
