@@ -396,17 +396,28 @@ jobs:
 
           echo "🎯 Set PlaybackSpeed di Roblox: ${ROBLOX_PLAYBACK}x"
 
-          # ── Step 3: Speed + pitch terikat (asetrate + soxr) ──
-          SPEEDED_WAV="speed_${{ inputs.job_id }}.wav"
-          ffmpeg -y -i "$MASTER_WAV" \
+         # ── Step 3: Speed + pitch terikat (asetrate + soxr) ──
+        SPEEDED_WAV="speed_${{ inputs.job_id }}.wav"
+
+        if [ "$BYPASS_MODE" == "slow" ]; then
+            # SLOW MODE: audio diperlambat, Roblox diputar cepat
+            NEW_RATE=$(awk -v sr="$SAMPLE_RATE" -v t="$EFFECTIVE_SPEED" 'BEGIN { printf "%.0f", sr / t }')
+            echo "🎛 Mode SLOW: upload ÷${EFFECTIVE_SPEED}, Roblox PlaybackSpeed ×${EFFECTIVE_SPEED}"
+        else
+            # FAST MODE: audio dipercepat, Roblox diputar lambat
+            NEW_RATE=$(awk -v sr="$SAMPLE_RATE" -v t="$EFFECTIVE_SPEED" 'BEGIN { printf "%.0f", sr * t }')
+            echo "🎛 Mode FAST: upload ×${EFFECTIVE_SPEED}, Roblox PlaybackSpeed ×${ROBLOX_PLAYBACK}"
+        fi
+
+        ffmpeg -y -i "$MASTER_WAV" \
             -af "asetrate=${NEW_RATE},${SOXR_FILTER}" \
             -ar $SAMPLE_RATE -ac 2 \
             -c:a pcm_s16le \
             -loglevel error \
             "$SPEEDED_WAV" 2>> ffmpeg-error.log || {
-              echo "❌ Gagal menerapkan speed"
-              cat ffmpeg-error.log
-              exit 1
+                echo "❌ Gagal menerapkan speed"
+                cat ffmpeg-error.log
+                exit 1
             }
 
           ADJUSTED_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$SPEEDED_WAV")
