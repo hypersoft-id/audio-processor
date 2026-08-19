@@ -292,9 +292,9 @@ jobs:
           cd ..
 
       # ===================================================================
-      # PROCESS AUDIO — MODIFIKASI UNTUK BYPASS COPYRIGHT
+      # PROCESS AUDIO — Rubberband Tempo + Pitch (Sinkron)
       # ===================================================================
-      - name: Process Audio for Copyright Bypass
+      - name: Process Audio with Rubberband (Tempo + Pitch)
         id: process
         run: |
           cd temp
@@ -326,16 +326,14 @@ jobs:
           SAMPLE_RATE=48000
 
           # ════════════════════════════════════════════════
-          # PARAMETER BYPASS COPYRIGHT
+          # PARAMETER BYPASS COPYRIGHT (SINKRON)
           # ════════════════════════════════════════════════
-          # SPEED: 2.3x (durasi jadi pendek)
-          # PITCH_SHIFT: 1.5x (nada naik untuk bypass copyright)
-          # Saat di Roblox dengan PlaybackSpeed 0.43x:
-          #   - Durasi kembali normal
-          #   - Pitch turun: 0.43 × 1.5 = 0.645x
-          #   - Suara masih cukup normal (tidak terlalu berat)
+          # TEMPO: 2.3x (durasi jadi pendek)
+          # PITCH_SHIFT: 1.5x (nada naik untuk bypass)
+          # Rubberband menjaga sinkronisasi vokal & beat
           # ════════════════════════════════════════════════
 
+          TEMPO=$MANUAL_SPEED
           PITCH_SHIFT=1.5
 
           case "$OUTPUT_FORMAT" in
@@ -346,64 +344,50 @@ jobs:
           esac
 
           echo "🎚 Output: $OUTPUT_FORMAT @ ${SAMPLE_RATE}Hz stereo"
-          echo "🎯 Pitch shift untuk bypass copyright: ${PITCH_SHIFT}x"
+          echo "🎯 Tempo: ${TEMPO}x, Pitch: ${PITCH_SHIFT}x"
 
-          # ── Step 1: Hitung speed factor ──
-          if [ "$AUTO_SPEED" == "true" ]; then
-            if (( $(echo "$TOTAL_DURATION > $MAX_DURATION" | bc -l) )); then
-              SPEED=$(echo "scale=6; $TOTAL_DURATION / $MAX_DURATION" | bc -l)
-              echo "⚡ Auto speed: ${SPEED}x"
-            else
-              SPEED="$MANUAL_SPEED"
-              echo "⚡ Pakai speed manual: ${SPEED}x"
-            fi
-          else
-            SPEED="$MANUAL_SPEED"
-            echo "⚡ Speed manual: ${SPEED}x"
-          fi
-
-          # ── Step 2: BUILD ATEMPO CHAIN (Time Stretch) ──
-          build_atempo() {
-            local spd="$1"
-            local filters=""
-            while (( $(echo "$spd > 2.0" | bc -l) )); do
-              filters="${filters}atempo=2.0,"
-              spd=$(echo "scale=6; $spd / 2.0" | bc -l)
-            done
-            while (( $(echo "$spd < 0.5" | bc -l) )); do
-              filters="${filters}atempo=0.5,"
-              spd=$(echo "scale=6; $spd / 0.5" | bc -l)
-            done
-            spd=$(printf "%.6f" "$spd")
-            filters="${filters}atempo=${spd}"
-            echo "$filters"
-          }
-
-          TEMPO_FILTER=$(build_atempo "$SPEED")
-          echo "🎛 Tempo filter: ${TEMPO_FILTER}"
-
-          # ── Step 3: Terapkan Time Stretch (durasi pendek, pitch normal) ──
-          TEMP_WAV="temp_tempo_${{ inputs.job_id }}.wav"
+          # ── Step 1: Decode ke WAV lossless ──
+          MASTER_WAV="master_${{ inputs.job_id }}.wav"
           ffmpeg -y -i "$INPUT_FILE" \
-            -filter:a "$TEMPO_FILTER" \
             -ar $SAMPLE_RATE -ac 2 \
             -c:a pcm_s16le \
             -loglevel error \
-            "$TEMP_WAV" 2>> ffmpeg-error.log || {
-              echo "❌ Gagal time stretch"
+            "$MASTER_WAV" 2>> ffmpeg-error.log || {
+              echo "❌ Gagal decode ke WAV"
               cat ffmpeg-error.log
               exit 1
             }
 
-          # ── Step 4: Pitch Shift dengan rubberband (nada naik) ──
-          PITCH_WAV="pitch_${{ inputs.job_id }}.wav"
-          echo "🎛 Pitch shift: ${PITCH_SHIFT}x (bypass copyright)"
-          rubberband -p "$PITCH_SHIFT" "$TEMP_WAV" "$PITCH_WAV" || {
-            echo "❌ Rubberband pitch shift gagal"
+          TOTAL_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$MASTER_WAV")
+          echo "⏱ Durasi setelah decode: ${TOTAL_DURATION}s"
+
+          # ── Step 2: Auto Speed jika durasi > max ──
+          if [ "$AUTO_SPEED" == "true" ]; then
+            if (( $(echo "$TOTAL_DURATION > $MAX_DURATION" | bc -l) )); then
+              TEMPO=$(echo "scale=6; $TOTAL_DURATION / $MAX_DURATION" | bc -l)
+              echo "⚡ Auto tempo: ${TEMPO}x"
+            else
+              echo "⚡ Durasi <= ${MAX_DURATION}s, pakai tempo manual: ${TEMPO}x"
+            fi
+          else
+            echo "⚡ Tempo manual: ${TEMPO}x"
+          fi
+
+          # ── Step 3: Rubberband — Tempo + Pitch Shift (SINKRON) ──
+          # Rubberband menjaga sinkronisasi vokal dan beat
+          RUBBERBAND_FILE="rubberband_${{ inputs.job_id }}.wav"
+          echo "🎛 Rubberband: tempo=${TEMPO}x, pitch=${PITCH_SHIFT}x"
+          
+          rubberband -t "$TEMPO" -p "$PITCH_SHIFT" "$MASTER_WAV" "$RUBBERBAND_FILE" || {
+            echo "❌ Rubberband gagal"
             exit 1
           }
 
-          # ── Step 5: Normalisasi + Volume ──
+          ADJUSTED_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$RUBBERBAND_FILE")
+          echo "📏 Durasi setelah rubberband: ${ADJUSTED_DURATION}s"
+          echo "applied_speed=$TEMPO" >> $GITHUB_OUTPUT
+
+          # ── Step 4: Normalisasi + Volume ──
           FILTER_CHAIN=""
 
           if [ "$USE_LOUDNORM" == "true" ]; then
@@ -420,42 +404,48 @@ jobs:
             fi
           fi
 
-          # ── Step 6: Output final ──
-          OUTPUT_FILE="part_0_${{ inputs.job_id }}.${EXT}"
-          echo "🔧 Memproses final output..."
+          echo "🔗 Filter chain: ${FILTER_CHAIN}"
 
-          if [ -n "$FILTER_CHAIN" ]; then
-            ffmpeg -y -i "$PITCH_WAV" \
-              -filter:a "$FILTER_CHAIN" \
-              $OUT_CODEC -ar $SAMPLE_RATE -ac 2 \
-              -loglevel error \
-              "$OUTPUT_FILE" 2>> ffmpeg-error.log || {
-                echo "❌ FFmpeg gagal"
-                cat ffmpeg-error.log
-                exit 1
-              }
-          else
-            ffmpeg -y -i "$PITCH_WAV" \
-              $OUT_CODEC -ar $SAMPLE_RATE -ac 2 \
-              -loglevel error \
-              "$OUTPUT_FILE" 2>> ffmpeg-error.log || {
-                echo "❌ FFmpeg gagal"
-                cat ffmpeg-error.log
-                exit 1
-              }
-          fi
+          process_part() {
+            local start_in="$1"
+            local duration_in="$2"
+            local part_idx="$3"
+            local output_file="part_${part_idx}_${{ inputs.job_id }}.${EXT}"
 
-          # ── Step 7: Auto Cut jika durasi > max_duration ──
-          ADJUSTED_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUTPUT_FILE" 2>/dev/null || echo "0")
-          echo "📏 Durasi output: ${ADJUSTED_DURATION}s"
+            echo "🔧 Memproses bagian $((part_idx+1)): start=${start_in}s dur=${duration_in}s"
+
+            if [ -n "$FILTER_CHAIN" ]; then
+              ffmpeg -y -ss "$start_in" -i "$RUBBERBAND_FILE" -t "$duration_in" \
+                -filter:a "$FILTER_CHAIN" \
+                $OUT_CODEC -ar $SAMPLE_RATE -ac 2 \
+                -loglevel error \
+                "$output_file" 2>> ffmpeg-error.log || return 1
+            else
+              ffmpeg -y -ss "$start_in" -i "$RUBBERBAND_FILE" -t "$duration_in" \
+                $OUT_CODEC -ar $SAMPLE_RATE -ac 2 \
+                -loglevel error \
+                "$output_file" 2>> ffmpeg-error.log || return 1
+            fi
+
+            local part_dur part_size
+            part_dur=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$output_file" 2>/dev/null || echo "0")
+            part_size=$(stat -c%s "$output_file")
+
+            if (( $(echo "$part_dur > $MAX_DURATION + 5" | bc -l) )); then
+              echo "❌ Bagian $part_idx melebihi max_duration: ${part_dur}s > ${MAX_DURATION}s"
+              return 1
+            fi
+
+            echo "✅ Bagian $((part_idx+1)): durasi=${part_dur}s, ukuran=${part_size} bytes"
+            return 0
+          }
 
           if [ "$AUTO_CUT" == "true" ] && (( $(echo "$ADJUSTED_DURATION > $MAX_DURATION" | bc -l) )); then
-            echo "✂️ Durasi melebihi ${MAX_DURATION}s, melakukan auto cut..."
-            
             PARTS=$(echo "scale=0; ($ADJUSTED_DURATION + $MAX_DURATION - 1) / $MAX_DURATION" | bc)
             PARTS=$(printf '%d' "$PARTS")
             PART_DURATION=$(echo "scale=6; $ADJUSTED_DURATION / $PARTS" | bc -l)
 
+            echo "✂️ Auto cut: ${PARTS} bagian × ~${PART_DURATION}s"
             echo "parts=$PARTS" >> $GITHUB_OUTPUT
             echo "part_duration=$PART_DURATION" >> $GITHUB_OUTPUT
 
@@ -466,35 +456,45 @@ jobs:
               if (( $(echo "$REMAINING < $PART_DURATION" | bc -l) )); then
                 THIS_DURATION="$REMAINING"
               fi
-              PART_FILE="part_${i}_${{ inputs.job_id }}.${EXT}"
-              echo "🔧 Membuat bagian $((i+1)): start=${START_IN}s dur=${THIS_DURATION}s"
+              process_part "$START_IN" "$THIS_DURATION" "$i" || {
+                echo "❌ Gagal di bagian $i"
+                cat ffmpeg-error.log
+                exit 1
+              }
+            done
+          else
+            OUTPUT_FILE="part_0_${{ inputs.job_id }}.${EXT}"
+            echo "🔧 Memproses single file..."
 
-              ffmpeg -y -ss "$START_IN" -i "$PITCH_WAV" -t "$THIS_DURATION" \
-                -filter:a "$FILTER_CHAIN" \
+            if [ -n "$FILTER_CHAIN" ]; then
+              ffmpeg -y -i "$RUBBERBAND_FILE" -filter:a "$FILTER_CHAIN" \
                 $OUT_CODEC -ar $SAMPLE_RATE -ac 2 \
                 -loglevel error \
-                "$PART_FILE" 2>> ffmpeg-error.log || {
-                  echo "❌ Gagal membuat bagian $i"
+                "$OUTPUT_FILE" 2>> ffmpeg-error.log || {
+                  echo "❌ FFmpeg gagal"
                   cat ffmpeg-error.log
                   exit 1
                 }
-            done
+            else
+              ffmpeg -y -i "$RUBBERBAND_FILE" \
+                $OUT_CODEC -ar $SAMPLE_RATE -ac 2 \
+                -loglevel error \
+                "$OUTPUT_FILE" 2>> ffmpeg-error.log || {
+                  echo "❌ FFmpeg gagal"
+                  cat ffmpeg-error.log
+                  exit 1
+                }
+            fi
 
-            rm -f "$OUTPUT_FILE"
-            echo "ext=$EXT" >> $GITHUB_OUTPUT
-            echo "applied_speed=$SPEED" >> $GITHUB_OUTPUT
-          else
+            REAL_DUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUTPUT_FILE" 2>/dev/null || echo "0")
+            FILE_SIZE=$(stat -c%s "$OUTPUT_FILE")
+            echo "✅ Single file: durasi=${REAL_DUR}s, ukuran=${FILE_SIZE} bytes"
             echo "parts=1" >> $GITHUB_OUTPUT
-            echo "part_duration=$ADJUSTED_DURATION" >> $GITHUB_OUTPUT
-            echo "ext=$EXT" >> $GITHUB_OUTPUT
-            echo "applied_speed=$SPEED" >> $GITHUB_OUTPUT
+            echo "part_duration=$REAL_DUR" >> $GITHUB_OUTPUT
           fi
 
-          REAL_DUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUTPUT_FILE" 2>/dev/null || echo "0")
-          FILE_SIZE=$(stat -c%s "$OUTPUT_FILE")
-          echo "✅ Single file: durasi=${REAL_DUR}s, ukuran=${FILE_SIZE} bytes"
-
-          rm -f "$TEMP_WAV" "$PITCH_WAV"
+          echo "ext=$EXT" >> $GITHUB_OUTPUT
+          rm -f "$MASTER_WAV" "$RUBBERBAND_FILE"
           cd ..
 
       # ===================================================================
