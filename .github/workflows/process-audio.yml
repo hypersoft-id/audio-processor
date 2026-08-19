@@ -292,13 +292,11 @@ jobs:
           cd ..
 
       # ===================================================================
-      # PROCESS AUDIO — Speed + Pitch terikat (bypass copyright Roblox)
+      # PROCESS AUDIO — Roblox bypass (tempo + pitch terikat, tape mode)
       # ===================================================================
-      # Logika bypass:
-      #   1. Percepat audio TEMPO x (mis. 2.3) — tempo DAN nada naik bersamaan
-      #      (seperti mempercepat kaset, BUKAN time-stretch yang mempertahankan nada)
-      #   2. Upload ke Roblox
-      #   3. Di game, set PlaybackSpeed = 1/TEMPO (mis. 0.43) → suara kembali normal
+      # Referensi: upload dimodifikasi speed/pitch → PlaybackSpeed inverse di Studio
+      # Mode SLOW (track pendek): perlambat file, mainkan cepat di Roblox (kualitas terbaik)
+      # Mode FAST (track panjang): percepat file, mainkan lambat di Roblox
       # ===================================================================
       - name: Process Audio (Speed Bypass)
         id: process
@@ -329,16 +327,20 @@ jobs:
           AMPLIFY="${{ inputs.amplify }}"
           NORMALIZE_DB="${{ inputs.normalize_db }}"
           USE_LOUDNORM="${{ inputs.use_loudnorm }}"
-          SAMPLE_RATE=48000
-
-          TEMPO=$MANUAL_SPEED
+          SAMPLE_RATE=44100
 
           case "$OUTPUT_FORMAT" in
-            mp3)  OUT_CODEC="-c:a libmp3lame -b:a 320k" ; EXT="mp3"  ; FORMAT="mp3"  ;;
-            flac) OUT_CODEC="-c:a flac"                  ; EXT="flac" ; FORMAT="flac" ;;
-            wav)  OUT_CODEC="-c:a pcm_s16le"             ; EXT="wav"  ; FORMAT="wav"  ;;
-            ogg|*) OUT_CODEC="-c:a libvorbis -q:a 10"    ; EXT="ogg"  ; FORMAT="ogg"  ;;
+            mp3)  OUT_CODEC="-c:a libmp3lame -b:a 320k" ; EXT="mp3"  ;;
+            flac) OUT_CODEC="-c:a flac"                  ; EXT="flac" ;;
+            wav)  OUT_CODEC="-c:a pcm_s16le"             ; EXT="wav"  ;;
+            ogg|*) OUT_CODEC="-c:a libvorbis -q:a 8"     ; EXT="ogg"  ;;
           esac
+
+          SOXR_FILTER="aresample=${SAMPLE_RATE}:resampler=soxr:precision=28:cutoff=0.995:dither_method=triangular"
+          if ! ffmpeg -hide_banner -filters 2>/dev/null | grep -q soxr; then
+            SOXR_FILTER="aresample=${SAMPLE_RATE}"
+            echo "⚠️ libsoxr tidak tersedia, pakai resampler default"
+          fi
 
           echo "🎚 Output: $OUTPUT_FORMAT @ ${SAMPLE_RATE}Hz stereo"
 
@@ -357,31 +359,47 @@ jobs:
           TOTAL_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$MASTER_WAV")
           echo "⏱ Durasi setelah decode: ${TOTAL_DURATION}s"
 
-          # ── Step 2: Hitung speed final ──
+          # ── Step 2: Hitung bypass speed ──
+          BYPASS_FACTOR=$MANUAL_SPEED
+          EFFECTIVE_SPEED=$BYPASS_FACTOR
+          MIN_SPEED_FOR_DURATION=$(echo "scale=6; $TOTAL_DURATION / $MAX_DURATION" | bc -l)
+
           if [ "$AUTO_SPEED" == "true" ]; then
-            if (( $(echo "$TOTAL_DURATION > $MAX_DURATION" | bc -l) )); then
-              TEMPO=$(echo "scale=6; $TOTAL_DURATION / $MAX_DURATION" | bc -l)
-              echo "⚡ Auto speed: ${TEMPO}x (durasi asli ${TOTAL_DURATION}s → muat ≤${MAX_DURATION}s)"
+            if (( $(echo "$MIN_SPEED_FOR_DURATION > $EFFECTIVE_SPEED" | bc -l) )); then
+              EFFECTIVE_SPEED=$MIN_SPEED_FOR_DURATION
+              echo "⚡ Auto speed: ${EFFECTIVE_SPEED}x (durasi ${TOTAL_DURATION}s → ≤${MAX_DURATION}s)"
             else
-              echo "⚡ Durasi <= ${MAX_DURATION}s, pakai speed manual: ${TEMPO}x"
+              echo "⚡ Durasi muat dengan bypass ${BYPASS_FACTOR}x"
             fi
           else
-            echo "⚡ Speed manual: ${TEMPO}x"
+            echo "⚡ Bypass speed: ${BYPASS_FACTOR}x"
           fi
 
-          ROBLOX_PLAYBACK=$(echo "scale=6; 1 / $TEMPO" | bc -l)
-          echo "🎯 Speed proses: ${TEMPO}x | Set di Roblox: ${ROBLOX_PLAYBACK}x"
+          SLOW_MAX_ORIGINAL=$(echo "scale=6; $MAX_DURATION / $BYPASS_FACTOR" | bc -l)
+          BYPASS_MODE="fast"
+          ROBLOX_PLAYBACK=$(echo "scale=6; 1 / $EFFECTIVE_SPEED" | bc -l)
 
-          # ── Step 3: Speed + pitch terikat (asetrate) ──
-          # Penting: JANGAN pakai atempo/rubberband -t saja karena itu mempertahankan nada.
-          # Bypass Roblox butuh tempo & nada naik bersamaan agar PlaybackSpeed inverse mengembalikan suara normal.
+          if [ "$AUTO_SPEED" != "true" ] && (( $(echo "$TOTAL_DURATION <= $SLOW_MAX_ORIGINAL" | bc -l) )); then
+            BYPASS_MODE="slow"
+            EFFECTIVE_SPEED=$BYPASS_FACTOR
+            ROBLOX_PLAYBACK=$BYPASS_FACTOR
+            NEW_RATE=$(awk -v sr="$SAMPLE_RATE" -v t="$BYPASS_FACTOR" 'BEGIN { printf "%.0f", sr / t }')
+            echo "🎛 Mode SLOW: upload ÷${BYPASS_FACTOR}, Roblox PlaybackSpeed ×${BYPASS_FACTOR}"
+          else
+            BYPASS_MODE="fast"
+            NEW_RATE=$(awk -v sr="$SAMPLE_RATE" -v t="$EFFECTIVE_SPEED" 'BEGIN { printf "%.0f", sr * t }')
+            echo "🎛 Mode FAST: upload ×${EFFECTIVE_SPEED}, Roblox PlaybackSpeed ×${ROBLOX_PLAYBACK}"
+            if (( $(echo "$ROBLOX_PLAYBACK < 0.5" | bc -l) )); then
+              echo "⚠️ Playback < 0.5x sering terdengar terjepit. Gunakan speed 2.0x untuk hasil lebih bersih."
+            fi
+          fi
+
+          echo "🎯 Set PlaybackSpeed di Roblox: ${ROBLOX_PLAYBACK}x"
+
+          # ── Step 3: Speed + pitch terikat (asetrate + soxr) ──
           SPEEDED_WAV="speed_${{ inputs.job_id }}.wav"
-          NEW_RATE=$(awk -v sr="$SAMPLE_RATE" -v t="$TEMPO" 'BEGIN { printf "%.0f", sr * t }')
-
-          echo "🎛 FFmpeg asetrate: ${SAMPLE_RATE}Hz → ${NEW_RATE}Hz (factor ${TEMPO}x)"
-
           ffmpeg -y -i "$MASTER_WAV" \
-            -af "asetrate=${NEW_RATE},aresample=${SAMPLE_RATE}" \
+            -af "asetrate=${NEW_RATE},${SOXR_FILTER}" \
             -ar $SAMPLE_RATE -ac 2 \
             -c:a pcm_s16le \
             -loglevel error \
@@ -392,17 +410,17 @@ jobs:
             }
 
           ADJUSTED_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$SPEEDED_WAV")
-          echo "📏 Durasi setelah speed: ${ADJUSTED_DURATION}s (target ≈ $(echo "scale=2; $TOTAL_DURATION / $TEMPO" | bc -l)s)"
-          echo "applied_speed=$TEMPO" >> $GITHUB_OUTPUT
+          echo "📏 Durasi setelah speed: ${ADJUSTED_DURATION}s"
+          echo "applied_speed=$EFFECTIVE_SPEED" >> $GITHUB_OUTPUT
+          echo "roblox_playback=$ROBLOX_PLAYBACK" >> $GITHUB_OUTPUT
+          echo "bypass_mode=$BYPASS_MODE" >> $GITHUB_OUTPUT
 
-          # ── Step 4: Normalisasi + Volume ──
+          # ── Step 4: Volume ringan (hindari loudnorm — merusak musik) ──
           FILTER_CHAIN=""
-
           if [ "$USE_LOUDNORM" == "true" ]; then
-            TP=$(echo "$NORMALIZE_DB" | tr -d '-')
-            FILTER_CHAIN="loudnorm=I=-16:LRA=11:TP=-${TP}:linear=true"
+            FILTER_CHAIN="dynaudnorm=f=150:g=10:p=0.9"
+            echo "🔗 Normalisasi: dynaudnorm (ringan)"
           fi
-
           if [ "$AMPLIFY" != "0" ] && [ -n "$AMPLIFY" ]; then
             VOLUME=$(echo "scale=6; e(l(10)*${AMPLIFY}/20)" | bc -l)
             if [ -n "$FILTER_CHAIN" ]; then
@@ -411,8 +429,6 @@ jobs:
               FILTER_CHAIN="volume=${VOLUME}"
             fi
           fi
-
-          echo "🔗 Filter chain: ${FILTER_CHAIN}"
 
           process_part() {
             local start_in="$1"
@@ -560,6 +576,8 @@ jobs:
               -F "file_size=${PART_SIZE}" \
               -F "format=${EXT}" \
               -F "settings_speed=${{ steps.process.outputs.applied_speed }}" \
+              -F "settings_roblox_playback=${{ steps.process.outputs.roblox_playback }}" \
+              -F "settings_bypass_mode=${{ steps.process.outputs.bypass_mode }}" \
               -F "settings_amplify=${{ inputs.amplify }}" \
               -F "settings_max_duration=${{ inputs.max_duration }}" \
               -F "settings_auto_cut=${{ inputs.auto_cut }}" \
