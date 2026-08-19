@@ -292,7 +292,7 @@ jobs:
           cd ..
 
       # ===================================================================
-      # PROCESS AUDIO — Rubberband (Change Speed Kualitas Tinggi)
+      # PROCESS AUDIO — Rubberband (Change Speed dengan -p)
       # ===================================================================
       - name: Process Audio with FFmpeg + Rubberband
         id: process
@@ -364,16 +364,17 @@ jobs:
             echo "⚡ Speed manual: ${SPEED}x"
           fi
 
-          # ── Step 3: Rubberband — Change Speed Kualitas Tinggi ──
+          # ── Step 3: Rubberband — Change Speed (pitch berubah) ──
           RUBBERBAND_FILE="rubberband_${{ inputs.job_id }}.wav"
-          echo "🎛 Rubberband speed: ${SPEED}x"
-          rubberband -t "$SPEED" "$MASTER_WAV" "$RUBBERBAND_FILE" || {
+          echo "🎛 Rubberband change speed: ${SPEED}x (pakai -p)"
+          rubberband -p "$SPEED" "$MASTER_WAV" "$RUBBERBAND_FILE" || {
             echo "❌ Rubberband gagal"
             exit 1
           }
 
           ADJUSTED_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$RUBBERBAND_FILE")
           echo "📏 Durasi setelah rubberband: ${ADJUSTED_DURATION}s"
+          echo "applied_speed=$SPEED" >> $GITHUB_OUTPUT
 
           # ── Step 4: Bangun filter chain (loudnorm + volume + compressor) ──
           FILTER_CHAIN=""
@@ -399,7 +400,6 @@ jobs:
           fi
 
           echo "🔗 Filter chain: ${FILTER_CHAIN}"
-          echo "applied_speed=$SPEED" >> $GITHUB_OUTPUT
 
           process_part() {
             local start_in="$1"
