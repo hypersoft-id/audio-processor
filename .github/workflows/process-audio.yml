@@ -116,7 +116,7 @@ jobs:
         run: |
           pip install yt-dlp
           sudo apt-get update
-          sudo apt-get install -y bc jq rubberband-cli
+          sudo apt-get install -y bc jq
 
       - name: Create temp directory
         run: mkdir -p temp
@@ -292,9 +292,15 @@ jobs:
           cd ..
 
       # ===================================================================
-      # PROCESS AUDIO — Rubberband Tempo + Pitch (Sinkron)
+      # PROCESS AUDIO — Speed + Pitch terikat (bypass copyright Roblox)
       # ===================================================================
-      - name: Process Audio with Rubberband (Tempo + Pitch)
+      # Logika bypass:
+      #   1. Percepat audio TEMPO x (mis. 2.3) — tempo DAN nada naik bersamaan
+      #      (seperti mempercepat kaset, BUKAN time-stretch yang mempertahankan nada)
+      #   2. Upload ke Roblox
+      #   3. Di game, set PlaybackSpeed = 1/TEMPO (mis. 0.43) → suara kembali normal
+      # ===================================================================
+      - name: Process Audio (Speed Bypass)
         id: process
         run: |
           cd temp
@@ -325,16 +331,7 @@ jobs:
           USE_LOUDNORM="${{ inputs.use_loudnorm }}"
           SAMPLE_RATE=48000
 
-          # ════════════════════════════════════════════════
-          # PARAMETER BYPASS COPYRIGHT (SINKRON)
-          # ════════════════════════════════════════════════
-          # TEMPO: 2.3x (durasi jadi pendek)
-          # PITCH_SHIFT: 1.5x (nada naik untuk bypass)
-          # Rubberband menjaga sinkronisasi vokal & beat
-          # ════════════════════════════════════════════════
-
           TEMPO=$MANUAL_SPEED
-          PITCH_SHIFT=1.5
 
           case "$OUTPUT_FORMAT" in
             mp3)  OUT_CODEC="-c:a libmp3lame -b:a 320k" ; EXT="mp3"  ; FORMAT="mp3"  ;;
@@ -344,7 +341,6 @@ jobs:
           esac
 
           echo "🎚 Output: $OUTPUT_FORMAT @ ${SAMPLE_RATE}Hz stereo"
-          echo "🎯 Tempo: ${TEMPO}x, Pitch: ${PITCH_SHIFT}x"
 
           # ── Step 1: Decode ke WAV lossless ──
           MASTER_WAV="master_${{ inputs.job_id }}.wav"
@@ -361,30 +357,42 @@ jobs:
           TOTAL_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$MASTER_WAV")
           echo "⏱ Durasi setelah decode: ${TOTAL_DURATION}s"
 
-          # ── Step 2: Auto Speed jika durasi > max ──
+          # ── Step 2: Hitung speed final ──
           if [ "$AUTO_SPEED" == "true" ]; then
             if (( $(echo "$TOTAL_DURATION > $MAX_DURATION" | bc -l) )); then
               TEMPO=$(echo "scale=6; $TOTAL_DURATION / $MAX_DURATION" | bc -l)
-              echo "⚡ Auto tempo: ${TEMPO}x"
+              echo "⚡ Auto speed: ${TEMPO}x (durasi asli ${TOTAL_DURATION}s → muat ≤${MAX_DURATION}s)"
             else
-              echo "⚡ Durasi <= ${MAX_DURATION}s, pakai tempo manual: ${TEMPO}x"
+              echo "⚡ Durasi <= ${MAX_DURATION}s, pakai speed manual: ${TEMPO}x"
             fi
           else
-            echo "⚡ Tempo manual: ${TEMPO}x"
+            echo "⚡ Speed manual: ${TEMPO}x"
           fi
 
-          # ── Step 3: Rubberband — Tempo + Pitch Shift (SINKRON) ──
-          # Rubberband menjaga sinkronisasi vokal dan beat
-          RUBBERBAND_FILE="rubberband_${{ inputs.job_id }}.wav"
-          echo "🎛 Rubberband: tempo=${TEMPO}x, pitch=${PITCH_SHIFT}x"
-          
-          rubberband -t "$TEMPO" -p "$PITCH_SHIFT" "$MASTER_WAV" "$RUBBERBAND_FILE" || {
-            echo "❌ Rubberband gagal"
-            exit 1
-          }
+          ROBLOX_PLAYBACK=$(echo "scale=6; 1 / $TEMPO" | bc -l)
+          echo "🎯 Speed proses: ${TEMPO}x | Set di Roblox: ${ROBLOX_PLAYBACK}x"
 
-          ADJUSTED_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$RUBBERBAND_FILE")
-          echo "📏 Durasi setelah rubberband: ${ADJUSTED_DURATION}s"
+          # ── Step 3: Speed + pitch terikat (asetrate) ──
+          # Penting: JANGAN pakai atempo/rubberband -t saja karena itu mempertahankan nada.
+          # Bypass Roblox butuh tempo & nada naik bersamaan agar PlaybackSpeed inverse mengembalikan suara normal.
+          SPEEDED_WAV="speed_${{ inputs.job_id }}.wav"
+          NEW_RATE=$(awk -v sr="$SAMPLE_RATE" -v t="$TEMPO" 'BEGIN { printf "%.0f", sr * t }')
+
+          echo "🎛 FFmpeg asetrate: ${SAMPLE_RATE}Hz → ${NEW_RATE}Hz (factor ${TEMPO}x)"
+
+          ffmpeg -y -i "$MASTER_WAV" \
+            -af "asetrate=${NEW_RATE},aresample=${SAMPLE_RATE}" \
+            -ar $SAMPLE_RATE -ac 2 \
+            -c:a pcm_s16le \
+            -loglevel error \
+            "$SPEEDED_WAV" 2>> ffmpeg-error.log || {
+              echo "❌ Gagal menerapkan speed"
+              cat ffmpeg-error.log
+              exit 1
+            }
+
+          ADJUSTED_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$SPEEDED_WAV")
+          echo "📏 Durasi setelah speed: ${ADJUSTED_DURATION}s (target ≈ $(echo "scale=2; $TOTAL_DURATION / $TEMPO" | bc -l)s)"
           echo "applied_speed=$TEMPO" >> $GITHUB_OUTPUT
 
           # ── Step 4: Normalisasi + Volume ──
@@ -415,13 +423,13 @@ jobs:
             echo "🔧 Memproses bagian $((part_idx+1)): start=${start_in}s dur=${duration_in}s"
 
             if [ -n "$FILTER_CHAIN" ]; then
-              ffmpeg -y -ss "$start_in" -i "$RUBBERBAND_FILE" -t "$duration_in" \
+              ffmpeg -y -ss "$start_in" -i "$SPEEDED_WAV" -t "$duration_in" \
                 -filter:a "$FILTER_CHAIN" \
                 $OUT_CODEC -ar $SAMPLE_RATE -ac 2 \
                 -loglevel error \
                 "$output_file" 2>> ffmpeg-error.log || return 1
             else
-              ffmpeg -y -ss "$start_in" -i "$RUBBERBAND_FILE" -t "$duration_in" \
+              ffmpeg -y -ss "$start_in" -i "$SPEEDED_WAV" -t "$duration_in" \
                 $OUT_CODEC -ar $SAMPLE_RATE -ac 2 \
                 -loglevel error \
                 "$output_file" 2>> ffmpeg-error.log || return 1
@@ -467,7 +475,7 @@ jobs:
             echo "🔧 Memproses single file..."
 
             if [ -n "$FILTER_CHAIN" ]; then
-              ffmpeg -y -i "$RUBBERBAND_FILE" -filter:a "$FILTER_CHAIN" \
+              ffmpeg -y -i "$SPEEDED_WAV" -filter:a "$FILTER_CHAIN" \
                 $OUT_CODEC -ar $SAMPLE_RATE -ac 2 \
                 -loglevel error \
                 "$OUTPUT_FILE" 2>> ffmpeg-error.log || {
@@ -476,7 +484,7 @@ jobs:
                   exit 1
                 }
             else
-              ffmpeg -y -i "$RUBBERBAND_FILE" \
+              ffmpeg -y -i "$SPEEDED_WAV" \
                 $OUT_CODEC -ar $SAMPLE_RATE -ac 2 \
                 -loglevel error \
                 "$OUTPUT_FILE" 2>> ffmpeg-error.log || {
@@ -494,7 +502,7 @@ jobs:
           fi
 
           echo "ext=$EXT" >> $GITHUB_OUTPUT
-          rm -f "$MASTER_WAV" "$RUBBERBAND_FILE"
+          rm -f "$MASTER_WAV" "$SPEEDED_WAV"
           cd ..
 
       # ===================================================================
