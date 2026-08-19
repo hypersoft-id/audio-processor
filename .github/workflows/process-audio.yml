@@ -291,7 +291,7 @@ jobs:
           cd ..
 
       # ===================================================================
-      # PROCESS AUDIO — Change Speed (setpts) + Loudnorm + WAV intermediate
+      # PROCESS AUDIO — Change Speed (asetpts) + Loudnorm + WAV intermediate
       # ===================================================================
       - name: Process Audio with FFmpeg
         id: process
@@ -364,12 +364,9 @@ jobs:
             echo "⚡ Speed manual: ${SPEED}x"
           fi
 
-          # Hitung rasio untuk change speed (1/speed)
+          # ── Step 3: Bangun filter chain (Change Speed with asetpts) ──
           SPEED_RATIO=$(echo "scale=10; 1 / $SPEED" | bc -l)
-          echo "🎛 Speed=${SPEED}x, Ratio=${SPEED_RATIO}"
-
-          # ── Step 3: Bangun filter chain (Change Speed) ──
-          FILTER_CHAIN="setpts=${SPEED_RATIO}*PTS, aresample=48000:resampler=soxr:precision=28"
+          FILTER_CHAIN="asetpts=${SPEED_RATIO}*PTS, aresample=48000:resampler=soxr:precision=28"
 
           echo "🎛 Speed=${SPEED}x, Ratio=${SPEED_RATIO}"
 
