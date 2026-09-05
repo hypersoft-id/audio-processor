@@ -40,14 +40,14 @@ on:
         required: false
         type: string
       speed:
-        description: 'Kecepatan tempo manual (0.5–5.0) — dipakai jika auto_speed=false'
+        description: 'Kecepatan pre-proses (0.5–5.0)'
         required: false
         default: '2.3'
         type: string
       amplify:
-        description: 'Gain tambahan dalam dB setelah loudnorm (-20 sampai 20)'
+        description: 'Gain tambahan dalam dB (-20 sampai 20)'
         required: false
-        default: '0'
+        default: '-4'
         type: string
       max_duration:
         description: 'Durasi maksimum per bagian (detik) — default 400 (batas Roblox)'
@@ -101,9 +101,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ================================================================
-      # SETUP FFmpeg & RUBBERBAND
-      # ================================================================
       - name: Setup FFmpeg and Rubberband
         run: |
           sudo apt-get update
@@ -297,7 +294,7 @@ jobs:
           cd ..
 
       # ===================================================================
-      # PROCESS AUDIO — Rubberband R3 Engine (Kualitas Maksimal)
+      # PROCESS AUDIO — Rubberband R3 Engine (Pre-proses = 2.3x)
       # ===================================================================
       - name: Process Audio with Rubberband
         id: process
@@ -352,29 +349,30 @@ jobs:
               exit 1
             }
 
-          # Ambil durasi aktual dari WAV
           TOTAL_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$MASTER_WAV")
           echo "⏱ Durasi setelah decode: ${TOTAL_DURATION}s"
 
-          # ── Step 2: Hitung speed factor ──
+          # ── Step 2: Hitung speed PRE-PROSES ──
           if [ "$AUTO_SPEED" == "true" ]; then
             if (( $(echo "$TOTAL_DURATION > $MAX_DURATION" | bc -l) )); then
               SPEED=$(echo "scale=6; $TOTAL_DURATION / $MAX_DURATION" | bc -l)
               echo "⚡ Auto speed: ${SPEED}x (fit ke ${MAX_DURATION}s)"
             else
+              # PRE-PROSES = speed manual (contoh: 2.3x)
               SPEED="$MANUAL_SPEED"
-              echo "⚡ Durasi <= ${MAX_DURATION}s, pakai speed manual: ${SPEED}x"
+              echo "⚡ Durasi <= ${MAX_DURATION}s, pakai pre-proses speed: ${SPEED}x"
             fi
           else
+            # PRE-PROSES = speed manual (contoh: 2.3x)
             SPEED="$MANUAL_SPEED"
-            echo "⚡ Speed manual: ${SPEED}x"
+            echo "⚡ Pre-proses speed: ${SPEED}x"
           fi
 
-          # ── Step 3: Rubberband Time Stretch (R3 Engine - Kualitas Tertinggi) ──
+          # ── Step 3: Rubberband Time Stretch (R3 Engine) ──
           STRETCHED_WAV="stretched_${{ inputs.job_id }}.wav"
           
-          echo "🔄 Rubberband time-stretch: ${SPEED}x (R3 engine - kualitas tertinggi)"
-          echo "   Parameter: -3 (R3 engine) --pitch 0 -c 5 (crispness)"
+          echo "🔄 Rubberband time-stretch: ${SPEED}x (R3 engine)"
+          echo "   Parameter: -3 (R3 engine) --pitch 0 -c 5"
           
           rubberband -3 -t "$SPEED" \
             --pitch 0 \
@@ -388,8 +386,9 @@ jobs:
           ADJUSTED_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$STRETCHED_WAV")
           echo "📏 Durasi setelah time stretch: ${ADJUSTED_DURATION}s"
           echo "applied_speed=$SPEED" >> $GITHUB_OUTPUT
+          echo "playback_speed=$MANUAL_SPEED" >> $GITHUB_OUTPUT
 
-          # ── Step 4: Bangun filter chain untuk loudnorm + amplify + compressor ──
+          # ── Step 4: Filter chain ──
           FILTER_CHAIN=""
 
           if [ "$USE_LOUDNORM" == "true" ]; then
