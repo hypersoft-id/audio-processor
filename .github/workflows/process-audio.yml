@@ -40,7 +40,7 @@ on:
         required: false
         type: string
       speed:
-        description: 'Kecepatan pre-proses (0.5–5.0)'
+        description: 'Kecepatan playback di Roblox (0.5–5.0)'
         required: false
         default: '2.3'
         type: string
@@ -294,7 +294,7 @@ jobs:
           cd ..
 
       # ===================================================================
-      # PROCESS AUDIO — Rubberband R3 Engine (Pre-proses = 2.3x)
+      # PROCESS AUDIO — Rubberband R3 Engine (Pre-proses = 1/speed)
       # ===================================================================
       - name: Process Audio with Rubberband
         id: process
@@ -321,7 +321,7 @@ jobs:
           MAX_DURATION="${{ inputs.max_duration }}"
           AUTO_CUT="${{ inputs.auto_cut }}"
           AUTO_SPEED="${{ inputs.auto_speed }}"
-          MANUAL_SPEED="${{ inputs.speed }}"
+          PLAYBACK_SPEED="${{ inputs.speed }}"
           AMPLIFY="${{ inputs.amplify }}"
           NORMALIZE_DB="${{ inputs.normalize_db }}"
           USE_LOUDNORM="${{ inputs.use_loudnorm }}"
@@ -352,20 +352,21 @@ jobs:
           TOTAL_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$MASTER_WAV")
           echo "⏱ Durasi setelah decode: ${TOTAL_DURATION}s"
 
-          # ── Step 2: Hitung speed PRE-PROSES ──
+          # ── Step 2: Hitung speed PRE-PROSES (PERCEPAT: 1/playback_speed) ──
           if [ "$AUTO_SPEED" == "true" ]; then
             if (( $(echo "$TOTAL_DURATION > $MAX_DURATION" | bc -l) )); then
+              # Durasi > 400s, hitung speed agar muat
               SPEED=$(echo "scale=6; $TOTAL_DURATION / $MAX_DURATION" | bc -l)
               echo "⚡ Auto speed: ${SPEED}x (fit ke ${MAX_DURATION}s)"
             else
-              # PRE-PROSES = speed manual (contoh: 2.3x)
-              SPEED="$MANUAL_SPEED"
-              echo "⚡ Durasi <= ${MAX_DURATION}s, pakai pre-proses speed: ${SPEED}x"
+              # PERCEPAT: 1 / playback speed
+              SPEED=$(echo "scale=6; 1 / $PLAYBACK_SPEED" | bc -l)
+              echo "⚡ Pre-proses speed: ${SPEED}x (1/${PLAYBACK_SPEED}) — audio jadi lebih cepat"
             fi
           else
-            # PRE-PROSES = speed manual (contoh: 2.3x)
-            SPEED="$MANUAL_SPEED"
-            echo "⚡ Pre-proses speed: ${SPEED}x"
+            # PERCEPAT: 1 / playback speed
+            SPEED=$(echo "scale=6; 1 / $PLAYBACK_SPEED" | bc -l)
+            echo "⚡ Pre-proses speed: ${SPEED}x (1/${PLAYBACK_SPEED}) — audio jadi lebih cepat"
           fi
 
           # ── Step 3: Rubberband Time Stretch (R3 Engine) ──
@@ -386,7 +387,7 @@ jobs:
           ADJUSTED_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$STRETCHED_WAV")
           echo "📏 Durasi setelah time stretch: ${ADJUSTED_DURATION}s"
           echo "applied_speed=$SPEED" >> $GITHUB_OUTPUT
-          echo "playback_speed=$MANUAL_SPEED" >> $GITHUB_OUTPUT
+          echo "playback_speed=$PLAYBACK_SPEED" >> $GITHUB_OUTPUT
 
           # ── Step 4: Filter chain ──
           FILTER_CHAIN=""
