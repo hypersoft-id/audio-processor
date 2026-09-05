@@ -102,7 +102,7 @@ jobs:
         uses: actions/checkout@v4
 
       # ================================================================
-      # SETUP FFmpeg & RUBBERBAND (tanpa dependency bermasalah)
+      # SETUP FFmpeg & RUBBERBAND (Kualitas Maksimal)
       # ================================================================
       - name: Setup FFmpeg and Rubberband
         run: |
@@ -297,7 +297,7 @@ jobs:
           cd ..
 
       # ===================================================================
-      # PROCESS AUDIO — Rubberband Time Stretch + Loudnorm
+      # PROCESS AUDIO — Rubberband Time Stretch (Kualitas Maksimal)
       # ===================================================================
       - name: Process Audio with Rubberband
         id: process
@@ -370,16 +370,17 @@ jobs:
             echo "⚡ Speed manual: ${SPEED}x"
           fi
 
-          # ── Step 3: Rubberband Time Stretch (kualitas tinggi) ──
+          # ── Step 3: Rubberband Time Stretch (KUALITAS MAKSIMAL) ──
           STRETCHED_WAV="stretched_${{ inputs.job_id }}.wav"
           
-          echo "🔄 Rubberband time-stretch: ${SPEED}x"
+          echo "🔄 Rubberband time-stretch: ${SPEED}x (kualitas maksimal - crisp 5)"
+          echo "   Parameter: --pitch 0 --crisp 5 --window 30 --overlap 12 --phase 0"
           
           rubberband -t "$SPEED" \
             --pitch 0 \
             --crisp 5 \
-            --window 20 \
-            --overlap 10 \
+            --window 30 \
+            --overlap 12 \
             --phase 0 \
             "$MASTER_WAV" "$STRETCHED_WAV" 2>> rubberband-error.log || {
               echo "❌ Rubberband gagal"
