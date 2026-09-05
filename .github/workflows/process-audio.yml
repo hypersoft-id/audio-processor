@@ -101,8 +101,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup FFmpeg
-        uses: FedericoCarboni/setup-ffmpeg@v3
+      # ================================================================
+      # SETUP FFmpeg & RUBBERBAND (tanpa dependency bermasalah)
+      # ================================================================
+      - name: Setup FFmpeg and Rubberband
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg rubberband-cli librubberband-dev bc jq
+          ffmpeg -version | head -1
+          rubberband --version 2>/dev/null || echo "rubberband installed"
 
       - name: Cache pip packages
         uses: actions/cache@v4
@@ -112,11 +119,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install dependencies
+      - name: Install yt-dlp
         run: |
           pip install yt-dlp
-          sudo apt-get update
-          sudo apt-get install -y bc jq rubberband-cli librubberband-dev
 
       - name: Create temp directory
         run: mkdir -p temp
