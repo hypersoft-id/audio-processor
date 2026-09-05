@@ -115,7 +115,8 @@ jobs:
       - name: Install dependencies
         run: |
           pip install yt-dlp
-          sudo apt-get install -y bc jq
+          sudo apt-get update
+          sudo apt-get install -y bc jq rubberband-cli librubberband-dev
 
       - name: Create temp directory
         run: mkdir -p temp
@@ -291,9 +292,9 @@ jobs:
           cd ..
 
       # ===================================================================
-      # PROCESS AUDIO — Time Stretch (atempo) + Loudnorm + WAV intermediate
+      # PROCESS AUDIO — Rubberband Time Stretch + Loudnorm
       # ===================================================================
-      - name: Process Audio with FFmpeg
+      - name: Process Audio with Rubberband
         id: process
         run: |
           cd temp
@@ -333,7 +334,7 @@ jobs:
 
           echo "🎚 Output: $OUTPUT_FORMAT @ ${SAMPLE_RATE}Hz stereo"
 
-          # ── Step 1: Decode ke WAV lossless (resample berkualitas tinggi) ──
+          # ── Step 1: Decode ke WAV lossless ──
           MASTER_WAV="master_${{ inputs.job_id }}.wav"
           ffmpeg -y -i "$INPUT_FILE" \
             -ar $SAMPLE_RATE -ac 2 \
@@ -350,7 +351,7 @@ jobs:
           TOTAL_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$MASTER_WAV")
           echo "⏱ Durasi setelah decode: ${TOTAL_DURATION}s"
 
-          # ── Step 2: Hitung speed factor (time stretch, BUKAN change speed) ──
+          # ── Step 2: Hitung speed factor ──
           if [ "$AUTO_SPEED" == "true" ]; then
             if (( $(echo "$TOTAL_DURATION > $MAX_DURATION" | bc -l) )); then
               SPEED=$(echo "scale=6; $TOTAL_DURATION / $MAX_DURATION" | bc -l)
@@ -364,55 +365,40 @@ jobs:
             echo "⚡ Speed manual: ${SPEED}x"
           fi
 
-          # Skip time stretch jika speed ~1.0
-          NEED_TEMPO=0
-          if (( $(echo "$SPEED > 1.01" | bc -l) )) || (( $(echo "$SPEED < 0.99" | bc -l) )); then
-            NEED_TEMPO=1
-          fi
+          # ── Step 3: Rubberband Time Stretch (kualitas tinggi) ──
+          STRETCHED_WAV="stretched_${{ inputs.job_id }}.wav"
+          
+          echo "🔄 Rubberband time-stretch: ${SPEED}x"
+          
+          rubberband -t "$SPEED" \
+            --pitch 0 \
+            --crisp 5 \
+            --window 20 \
+            --overlap 10 \
+            --phase 0 \
+            "$MASTER_WAV" "$STRETCHED_WAV" 2>> rubberband-error.log || {
+              echo "❌ Rubberband gagal"
+              cat rubberband-error.log
+              exit 1
+            }
 
-          build_atempo() {
-            local spd="$1"
-            local filters=""
-            while (( $(echo "$spd > 2.0" | bc -l) )); do
-              filters="${filters}atempo=2.0,"
-              spd=$(echo "scale=6; $spd / 2.0" | bc -l)
-            done
-            while (( $(echo "$spd < 0.5" | bc -l) )); do
-              filters="${filters}atempo=0.5,"
-              spd=$(echo "scale=6; $spd / 0.5" | bc -l)
-            done
-            spd=$(printf "%.6f" "$spd")
-            filters="${filters}atempo=${spd}"
-            echo "$filters"
-          }
+          ADJUSTED_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$STRETCHED_WAV")
+          echo "📏 Durasi setelah time stretch: ${ADJUSTED_DURATION}s"
+          echo "applied_speed=$SPEED" >> $GITHUB_OUTPUT
 
-          # ── Step 3: Bangun filter chain ──
+          # ── Step 4: Bangun filter chain untuk loudnorm + amplify + compressor ──
           FILTER_CHAIN=""
-
-          if [ "$NEED_TEMPO" -eq 1 ]; then
-            TEMPO_FILTER=$(build_atempo "$SPEED")
-            FILTER_CHAIN="${TEMPO_FILTER}"
-          fi
-
-          echo "🎛 Speed=${SPEED}x NEED_TEMPO=${NEED_TEMPO}"
 
           if [ "$USE_LOUDNORM" == "true" ]; then
             TP=$(echo "$NORMALIZE_DB" | tr -d '-')
-            LOUDNORM="loudnorm=I=-16:LRA=11:TP=-${TP}:linear=true"
-            if [ -n "$FILTER_CHAIN" ]; then
-              FILTER_CHAIN="${FILTER_CHAIN},${LOUDNORM}"
-            else
-              FILTER_CHAIN="${LOUDNORM}"
-            fi
+            FILTER_CHAIN="loudnorm=I=-16:LRA=11:TP=-${TP}:linear=true"
           fi
 
-          # Gain tambahan + kompresor ringan untuk stabilitas
           if [ "$AMPLIFY" != "0" ] && [ -n "$AMPLIFY" ]; then
-            VOLUME=$(echo "scale=6; e(l(10)*${AMPLIFY}/20)" | bc -l)
             if [ -n "$FILTER_CHAIN" ]; then
-              FILTER_CHAIN="${FILTER_CHAIN},volume=${VOLUME}"
+              FILTER_CHAIN="${FILTER_CHAIN},volume=${AMPLIFY}dB"
             else
-              FILTER_CHAIN="volume=${VOLUME}"
+              FILTER_CHAIN="volume=${AMPLIFY}dB"
             fi
           fi
 
@@ -424,24 +410,18 @@ jobs:
 
           echo "🔗 Filter chain: ${FILTER_CHAIN}"
 
-          ADJUSTED_DURATION=$(echo "scale=3; $TOTAL_DURATION / $SPEED" | bc -l)
-          echo "📏 Durasi setelah time stretch: ${ADJUSTED_DURATION}s"
-          echo "applied_speed=$SPEED" >> $GITHUB_OUTPUT
-
+          # ── Step 5: Proses cut dan encode ──
           process_part() {
             local start_in="$1"
             local target_out_duration="$2"
             local part_idx="$3"
             local output_file="part_${part_idx}_${{ inputs.job_id }}.${EXT}"
-            local duration_in
-            duration_in=$(echo "scale=6; $target_out_duration * $SPEED" | bc -l)
 
-            echo "🔧 Memproses bagian $((part_idx+1)): start=${start_in}s in=${duration_in}s → target_out=${target_out_duration}s"
+            echo "🔧 Memproses bagian $((part_idx+1)): start=${start_in}s → out=${target_out_duration}s"
 
-            ffmpeg -y -ss "$start_in" -i "$MASTER_WAV" -t "$duration_in" \
+            ffmpeg -y -ss "$start_in" -i "$STRETCHED_WAV" -t "$target_out_duration" \
               -filter:a "$FILTER_CHAIN" \
-              $OUT_CODEC -ar $SAMPLE_RATE -ac 2 -f "$FORMAT" \
-              -t "$target_out_duration" \
+              $OUT_CODEC -ar $SAMPLE_RATE -ac 2 \
               -loglevel error \
               "$output_file" 2>> ffmpeg-error.log || return 1
 
@@ -449,9 +429,8 @@ jobs:
             part_dur=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$output_file" 2>/dev/null || echo "0")
             part_size=$(stat -c%s "$output_file")
 
-            # Validasi durasi output (bukan input) <= max_duration
             if (( $(echo "$part_dur > $MAX_DURATION + 5" | bc -l) )); then
-              echo "❌ Bagian $part_idx output melebihi max_duration: ${part_dur}s > ${MAX_DURATION}s (input=${duration_in}s)"
+              echo "❌ Bagian $part_idx melebihi max_duration: ${part_dur}s > ${MAX_DURATION}s"
               return 1
             fi
 
@@ -475,8 +454,7 @@ jobs:
               if (( $(echo "$REMAINING_OUT < $PART_OUT_DURATION" | bc -l) )); then
                 THIS_OUT_DURATION="$REMAINING_OUT"
               fi
-              START_IN=$(echo "scale=6; $i * $PART_OUT_DURATION * $SPEED" | bc -l)
-              process_part "$START_IN" "$THIS_OUT_DURATION" "$i" || {
+              process_part "$START_OUT" "$THIS_OUT_DURATION" "$i" || {
                 echo "❌ FFmpeg gagal di bagian $i"
                 cat ffmpeg-error.log
                 exit 1
@@ -486,8 +464,8 @@ jobs:
             OUTPUT_FILE="part_0_${{ inputs.job_id }}.${EXT}"
             echo "🔧 Memproses single file..."
 
-            ffmpeg -y -i "$MASTER_WAV" -filter:a "$FILTER_CHAIN" \
-              $OUT_CODEC -ar $SAMPLE_RATE -ac 2 -f "$FORMAT" \
+            ffmpeg -y -i "$STRETCHED_WAV" -filter:a "$FILTER_CHAIN" \
+              $OUT_CODEC -ar $SAMPLE_RATE -ac 2 \
               -loglevel error \
               "$OUTPUT_FILE" 2>> ffmpeg-error.log || {
                 echo "❌ FFmpeg gagal"
@@ -503,7 +481,7 @@ jobs:
           fi
 
           echo "ext=$EXT" >> $GITHUB_OUTPUT
-          rm -f "$MASTER_WAV"
+          rm -f "$MASTER_WAV" "$STRETCHED_WAV"
           cd ..
 
       # ===================================================================
@@ -581,7 +559,9 @@ jobs:
           
           ERROR_MSG="Workflow gagal pada step: ${{ github.job }}"
           
-          if [ -f temp/ffmpeg-error.log ]; then
+          if [ -f temp/rubberband-error.log ]; then
+            ERROR_MSG=$(cat temp/rubberband-error.log | tail -5 | tr '\n' ' ')
+          elif [ -f temp/ffmpeg-error.log ]; then
             ERROR_MSG=$(cat temp/ffmpeg-error.log | tail -5 | tr '\n' ' ')
           fi
           
@@ -606,6 +586,7 @@ jobs:
           name: error-logs-${{ inputs.job_id }}
           path: |
             temp/ffmpeg-error.log
+            temp/rubberband-error.log
             temp/info.json
             /tmp/callback_response.json
 
