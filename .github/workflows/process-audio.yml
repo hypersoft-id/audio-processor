@@ -375,9 +375,7 @@ jobs:
           echo "🔄 Rubberband time-stretch: ${SPEED}x (R3 engine)"
           echo "   Parameter: -3 (R3 engine) --pitch 0 -c 5"
           
-          rubberband -2 -t "$SPEED" \
-            --pitch "$SPEED" \
-            -c 6 \
+          rubberband -3 -t 0.43 -c 6
             "$MASTER_WAV" "$STRETCHED_WAV" 2>> rubberband-error.log || {
               echo "❌ Rubberband gagal"
               cat rubberband-error.log
