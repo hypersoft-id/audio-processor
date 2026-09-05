@@ -101,12 +101,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup FFmpeg and Rubberband
+      - name: Setup FFmpeg
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg rubberband-cli librubberband-dev bc jq
+          sudo apt-get install -y ffmpeg bc jq
           ffmpeg -version | head -1
-          rubberband --version 2>/dev/null || echo "rubberband installed"
 
       - name: Cache pip packages
         uses: actions/cache@v4
@@ -294,9 +293,9 @@ jobs:
           cd ..
 
       # ===================================================================
-      # PROCESS AUDIO — Rubberband R3 Engine (Pre-proses = 1/speed)
+      # PROCESS AUDIO — Change Speed + Pitch dengan FFmpeg
       # ===================================================================
-      - name: Process Audio with Rubberband
+      - name: Process Audio with FFmpeg
         id: process
         run: |
           cd temp
@@ -352,63 +351,45 @@ jobs:
           TOTAL_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$MASTER_WAV")
           echo "⏱ Durasi setelah decode: ${TOTAL_DURATION}s"
 
-          # ── Step 2: Hitung speed PRE-PROSES (PERCEPAT: 1/playback_speed) ──
-          if [ "$AUTO_SPEED" == "true" ]; then
-            if (( $(echo "$TOTAL_DURATION > $MAX_DURATION" | bc -l) )); then
-              # Durasi > 400s, hitung speed agar muat
-              SPEED=$(echo "scale=6; $TOTAL_DURATION / $MAX_DURATION" | bc -l)
-              echo "⚡ Auto speed: ${SPEED}x (fit ke ${MAX_DURATION}s)"
-            else
-              # PERCEPAT: 1 / playback speed
-              SPEED=$(echo "scale=6; 1 / $PLAYBACK_SPEED" | bc -l)
-              echo "⚡ Pre-proses speed: ${SPEED}x (1/${PLAYBACK_SPEED}) — audio jadi lebih cepat"
-            fi
-          else
-            # PERCEPAT: 1 / playback speed
-            SPEED=$(echo "scale=6; 1 / $PLAYBACK_SPEED" | bc -l)
-            echo "⚡ Pre-proses speed: ${SPEED}x (1/${PLAYBACK_SPEED}) — audio jadi lebih cepat"
-          fi
+          # ── Step 2: Hitung speed PRE-PROSES ──
+          # PRE-PROSES = 1 / playback_speed (contoh: 1/2.3 = 0.4348)
+          SPEED=$(echo "scale=6; 1 / $PLAYBACK_SPEED" | bc -l)
+          echo "⚡ Pre-proses speed: ${SPEED}x (audio dipercepat ${PLAYBACK_SPEED}x)"
 
-          # ── Step 3: Rubberband Time Stretch (R3 Engine) ──
+          # ── Step 3: CHANGE SPEED + PITCH dengan mengubah sample rate ──
           STRETCHED_WAV="stretched_${{ inputs.job_id }}.wav"
-          
-          echo "🔄 Rubberband time-stretch: ${SPEED}x (R3 engine)"
-          echo "   Parameter: -3 (R3 engine) --pitch 0 -c 5"
-          
-          rubberband -2 -t 0.43 -c 6 "$MASTER_WAV" "$STRETCHED_WAV" 2>> rubberband-error.log || {
-              echo "❌ Rubberband gagal"
-              cat rubberband-error.log
+
+          # Hitung sample rate baru: 48000 × 2.3 = 110400
+          NEW_SAMPLE_RATE=$(echo "scale=0; $SAMPLE_RATE * $PLAYBACK_SPEED" | bc)
+
+          echo "🔄 Change Speed + Pitch dengan FFmpeg (SAMA KAYAK AUDACITY/AUDIO CITY)"
+          echo "   Sample rate asli: ${SAMPLE_RATE}Hz"
+          echo "   Sample rate baru: ${NEW_SAMPLE_RATE}Hz (naik ${PLAYBACK_SPEED}x)"
+          echo "   Volume: ${AMPLIFY}dB"
+          echo "   ⚠️  Pitch akan naik ${PLAYBACK_SPEED}x, lalu di Roblox turun ${PLAYBACK_SPEED}x -> normal"
+
+          ffmpeg -y -i "$MASTER_WAV" \
+            -af "volume=${AMPLIFY}dB" \
+            -ar $NEW_SAMPLE_RATE \
+            -c:a pcm_s16le \
+            "$STRETCHED_WAV" 2>> ffmpeg-error.log || {
+              echo "❌ FFmpeg gagal"
+              cat ffmpeg-error.log
               exit 1
             }
 
           ADJUSTED_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$STRETCHED_WAV")
-          echo "📏 Durasi setelah time stretch: ${ADJUSTED_DURATION}s"
-          echo "applied_speed=$SPEED" >> $GITHUB_OUTPUT
+          echo "📏 Durasi setelah change speed: ${ADJUSTED_DURATION}s"
+          echo "applied_speed=$PLAYBACK_SPEED" >> $GITHUB_OUTPUT
           echo "playback_speed=$PLAYBACK_SPEED" >> $GITHUB_OUTPUT
 
-          # ── Step 4: Filter chain ──
+          # ── Step 4: Filter chain untuk loudnorm (opsional) ──
           FILTER_CHAIN=""
 
           if [ "$USE_LOUDNORM" == "true" ]; then
             TP=$(echo "$NORMALIZE_DB" | tr -d '-')
             FILTER_CHAIN="loudnorm=I=-16:LRA=11:TP=-${TP}:linear=true"
           fi
-
-          if [ "$AMPLIFY" != "0" ] && [ -n "$AMPLIFY" ]; then
-            if [ -n "$FILTER_CHAIN" ]; then
-              FILTER_CHAIN="${FILTER_CHAIN},volume=${AMPLIFY}dB"
-            else
-              FILTER_CHAIN="volume=${AMPLIFY}dB"
-            fi
-          fi
-
-          if [ -n "$FILTER_CHAIN" ]; then
-            FILTER_CHAIN="${FILTER_CHAIN},acompressor=threshold=-18dB:ratio=3:attack=5:release=50"
-          else
-            FILTER_CHAIN="acompressor=threshold=-18dB:ratio=3:attack=5:release=50"
-          fi
-
-          echo "🔗 Filter chain: ${FILTER_CHAIN}"
 
           # ── Step 5: Proses cut dan encode ──
           process_part() {
@@ -419,11 +400,18 @@ jobs:
 
             echo "🔧 Memproses bagian $((part_idx+1)): start=${start_in}s → out=${target_out_duration}s"
 
-            ffmpeg -y -ss "$start_in" -i "$STRETCHED_WAV" -t "$target_out_duration" \
-              -filter:a "$FILTER_CHAIN" \
-              $OUT_CODEC -ar $SAMPLE_RATE -ac 2 \
-              -loglevel error \
-              "$output_file" 2>> ffmpeg-error.log || return 1
+            if [ -n "$FILTER_CHAIN" ]; then
+              ffmpeg -y -ss "$start_in" -i "$STRETCHED_WAV" -t "$target_out_duration" \
+                -filter:a "$FILTER_CHAIN" \
+                $OUT_CODEC -ar $SAMPLE_RATE -ac 2 \
+                -loglevel error \
+                "$output_file" 2>> ffmpeg-error.log || return 1
+            else
+              ffmpeg -y -ss "$start_in" -i "$STRETCHED_WAV" -t "$target_out_duration" \
+                $OUT_CODEC -ar $SAMPLE_RATE -ac 2 \
+                -loglevel error \
+                "$output_file" 2>> ffmpeg-error.log || return 1
+            fi
 
             local part_dur part_size
             part_dur=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$output_file" 2>/dev/null || echo "0")
@@ -464,14 +452,26 @@ jobs:
             OUTPUT_FILE="part_0_${{ inputs.job_id }}.${EXT}"
             echo "🔧 Memproses single file..."
 
-            ffmpeg -y -i "$STRETCHED_WAV" -filter:a "$FILTER_CHAIN" \
-              $OUT_CODEC -ar $SAMPLE_RATE -ac 2 \
-              -loglevel error \
-              "$OUTPUT_FILE" 2>> ffmpeg-error.log || {
-                echo "❌ FFmpeg gagal"
-                cat ffmpeg-error.log
-                exit 1
-              }
+            if [ -n "$FILTER_CHAIN" ]; then
+              ffmpeg -y -i "$STRETCHED_WAV" \
+                -filter:a "$FILTER_CHAIN" \
+                $OUT_CODEC -ar $SAMPLE_RATE -ac 2 \
+                -loglevel error \
+                "$OUTPUT_FILE" 2>> ffmpeg-error.log || {
+                  echo "❌ FFmpeg gagal"
+                  cat ffmpeg-error.log
+                  exit 1
+                }
+            else
+              ffmpeg -y -i "$STRETCHED_WAV" \
+                $OUT_CODEC -ar $SAMPLE_RATE -ac 2 \
+                -loglevel error \
+                "$OUTPUT_FILE" 2>> ffmpeg-error.log || {
+                  echo "❌ FFmpeg gagal"
+                  cat ffmpeg-error.log
+                  exit 1
+                }
+            fi
 
             REAL_DUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUTPUT_FILE" 2>/dev/null || echo "0")
             FILE_SIZE=$(stat -c%s "$OUTPUT_FILE")
@@ -536,16 +536,16 @@ jobs:
               -F "settings_normalize_db=${{ inputs.normalize_db }}")
 
             echo "   HTTP $HTTP_RESP"
-            
+
             if [[ ! "$HTTP_RESP" =~ ^2[0-9][0-9]$ ]]; then
               echo "❌ Gagal upload bagian $((i+1)) (HTTP $HTTP_RESP)"
               cat /tmp/callback_response.json || true
               exit 1
             fi
-            
+
             echo "✅ Bagian $((i+1)) berhasil dikirim"
           done
-          
+
           echo "✅ Semua $PARTS bagian berhasil dikirim"
           cd ..
 
@@ -556,15 +556,13 @@ jobs:
         if: failure()
         run: |
           echo "❌ Workflow gagal, mengirim failure callback..."
-          
+
           ERROR_MSG="Workflow gagal pada step: ${{ github.job }}"
-          
-          if [ -f temp/rubberband-error.log ]; then
-            ERROR_MSG=$(cat temp/rubberband-error.log | tail -5 | tr '\n' ' ')
-          elif [ -f temp/ffmpeg-error.log ]; then
+
+          if [ -f temp/ffmpeg-error.log ]; then
             ERROR_MSG=$(cat temp/ffmpeg-error.log | tail -5 | tr '\n' ' ')
           fi
-          
+
           curl -s -X POST "${{ inputs.callback_url }}" \
             --max-time 10 \
             --connect-timeout 5 \
@@ -573,7 +571,7 @@ jobs:
             -F "error_message=${ERROR_MSG}" \
             -F "github_run_id=${{ github.run_id }}" \
             || true
-          
+
           echo "📤 Failure callback terkirim"
 
       # ===================================================================
@@ -586,7 +584,6 @@ jobs:
           name: error-logs-${{ inputs.job_id }}
           path: |
             temp/ffmpeg-error.log
-            temp/rubberband-error.log
             temp/info.json
             /tmp/callback_response.json
 
